@@ -189,6 +189,19 @@ class TestRenderCache:
         assert url == "http://fake/ok.png"  # 失败未缓存,恢复后成功
         assert len(calls) == 2
 
+    def test_viewport_height_injected(self, plugin):
+        """渲染 options 自动注入极小 viewport 高度 → 图片长度随内容自适应。"""
+        captured = {}
+
+        async def fake_render(template, data, options=None):
+            captured.update(options or {})
+            return "http://fake/x.png"
+
+        plugin.html_render = fake_render
+        asyncio.run(plugin._render_schedule("T", dict(self.DATA), options={"quality": 88}))
+        assert captured.get("viewport_height") == 8  # 内容决定图片长度
+        assert captured.get("quality") == 88  # 调用方显式选项不被覆盖
+
     def test_all_views_cached_independently(self, plugin):
         """今日/明日/本周/下周四个视图各查两次:只渲染 4 次,且互不串缓存。"""
         calls = []

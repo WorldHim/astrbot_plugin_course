@@ -616,6 +616,11 @@ class CoursePlugin(Star):
             .encode("utf-8")
         ).hexdigest()
 
+        # viewport 高度取极小值:full_page 整页截图的高度 = max(内容高度, 视口高度),
+        # 视口越小图片长度越贴近实际内容(默认 720px 会给内容少的页面留下大片空白)
+        options = dict(options or {})
+        options.setdefault("viewport_height", 8)
+
         entry = self._render_cache.get(cache_key)
         if cache_minutes > 0 and entry and entry[0] > now_ts:
             return entry[1]
