@@ -5,15 +5,13 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from astrbot_plugin_course.course_types import CourseEvent, CourseSeries, SHANGHAI_TZ
+from astrbot_plugin_course.help_content import TOOL_LINK, help_render_data, help_text
 from astrbot_plugin_course.main import (
     PLUGIN_VERSION,
     _SenderSessionFilter,
     _day_text_fallback,
     _event_view,
     _group_now_text,
-    _help_render_data,
-    _help_text,
-    _HELP_TOOL_LINK,
     _resolve_timezone,
     _week_text_fallback,
 )
@@ -229,7 +227,7 @@ class TestHelpText:
     """帮助指令文本完整性:全部指令均被列出。"""
 
     def test_contains_all_commands(self):
-        text = _help_text()
+        text = help_text()
         for cmd in [
             "绑定课表",
             "删除课表",
@@ -247,7 +245,7 @@ class TestHelpText:
             assert f"/{cmd}" in text, f"帮助文本缺少指令 /{cmd}"
 
     def test_grouped_with_tip(self):
-        text = _help_text()
+        text = help_text()
         for section in ["【课表管理】", "【课表查询】", "【配置管理】"]:
             assert section in text
         assert "课表转日历" in text  # 课表文件导出工具(WikiLake)提示
@@ -256,7 +254,7 @@ class TestHelpText:
 class TestHelpCommand:
     """帮助指令:图片渲染(同版本走缓存)与文字兜底。"""
     def test_render_data_structure(self):
-        data = _help_render_data()
+        data = help_render_data(PLUGIN_VERSION)
         cmds = [c["cmd"] for s in data["sections"] for c in s["commands"]]
         assert len(cmds) == 11
         assert all(c.startswith("/") for c in cmds)
@@ -277,7 +275,7 @@ class TestHelpCommand:
         plugin.html_render = fake_render
         r1 = asyncio.run(run_help())
         r2 = asyncio.run(run_help())
-        assert r1 == [("image", "http://fake/help.png"), _HELP_TOOL_LINK]
+        assert r1 == [("image", "http://fake/help.png"), TOOL_LINK]
         assert r2 == r1
         assert len(calls) == 1  # 同版本帮助内容相同 → 命中渲染缓存,只渲染一次
 
@@ -293,7 +291,7 @@ class TestHelpCommand:
         assert len(results) == 2
         assert isinstance(results[0], str)
         assert "/绑定课表" in results[0]  # 文字兜底包含指令列表
-        assert "wikilake" in results[1] and results[1] == _HELP_TOOL_LINK  # 链接单独成条(可点击)
+        assert "wikilake" in results[1] and results[1] == TOOL_LINK  # 链接单独成条(可点击)
 
 
 class TestReminderToggle:
