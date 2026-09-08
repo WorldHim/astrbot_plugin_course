@@ -269,3 +269,115 @@ WEEK_TMPL = r"""
 </body>
 </html>
 """
+
+HELP_TMPL = r"""
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width={{ page_width | default(420) }}, initial-scale=1" />
+  <style>
+    :root {
+      --bg: #ffffff;
+      --text-main: #1e293b;
+      --text-muted: #64748b;
+      --accent: #3b82f6;
+      --accent-soft: #eff6ff;
+      --card-bg: #f8fafc;
+      --border: #e2e8f0;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html {
+      width: fit-content;
+      background: var(--bg);
+    }
+    body {
+      background: var(--bg);
+      font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+      width: {{ page_width | default(420) }}px;
+    }
+    .container { padding: 24px; background: var(--bg); }
+    .header {
+      margin-bottom: 20px;
+      padding-bottom: 14px;
+      border-bottom: 2px solid var(--accent-soft);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .header h1 {
+      font-size: 24px;
+      font-weight: 900;
+      color: var(--text-main);
+    }
+    .version-badge {
+      font-size: 13px;
+      color: var(--accent);
+      font-weight: 700;
+      background: var(--accent-soft);
+      padding: 4px 12px;
+      border-radius: 8px;
+    }
+    .section-stack { display: flex; flex-direction: column; gap: 14px; }
+    .section {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 14px 16px;
+    }
+    .section-title {
+      font-size: 15px;
+      font-weight: 800;
+      color: var(--accent);
+      margin-bottom: 10px;
+      padding-left: 10px;
+      border-left: 4px solid var(--accent);
+    }
+    .cmd-row {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      padding: 7px 0;
+    }
+    .cmd-row + .cmd-row { border-top: 1px dashed var(--border); }
+    .cmd { font-size: 16px; font-weight: 800; color: var(--text-main); }
+    .desc { font-size: 13px; color: var(--text-muted); font-weight: 600; line-height: 1.5; }
+    .tips {
+      margin-top: 16px;
+      padding-top: 12px;
+      border-top: 2px solid var(--accent-soft);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .tip { font-size: 13px; color: var(--text-muted); font-weight: 600; line-height: 1.6; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>📚 {{ title }}</h1>
+      <div class="version-badge">v{{ version }}</div>
+    </div>
+    <div class="section-stack">
+      {% for s in sections %}
+        <div class="section">
+          <div class="section-title">{{ s.name }}</div>
+          {% for c in s.commands %}
+            <div class="cmd-row">
+              <span class="cmd">{{ c.cmd }}</span>
+              <span class="desc">{{ c.desc }}</span>
+            </div>
+          {% endfor %}
+        </div>
+      {% endfor %}
+    </div>
+    <div class="tips">
+      {% for tip in tips %}
+        <div class="tip">{{ tip }}</div>
+      {% endfor %}
+    </div>
+  </div>
+</body>
+</html>
+"""

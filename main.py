@@ -19,16 +19,19 @@ from astrbot.core.utils.session_waiter import SessionController, session_waiter
 
 from .course_types import CourseEvent, CourseSeries, SHANGHAI_TZ, UserBinding
 from .ics_parser import IcsParser
-from .render_templates import DAY_TMPL, WEEK_TMPL
+from .render_templates import DAY_TMPL, HELP_TMPL, WEEK_TMPL
 from .schedule_engine import day_events, upcoming_within_15m, week_events, week_start
 from .storage import CourseStorage
+
+# 插件版本(@register 与帮助图片共用;metadata.yaml 的 version 需保持一致)
+PLUGIN_VERSION = "2.1.0"
 
 
 @register(
     "astrbot_plugin_course",
     "WorldHim",
     "绑定个人课表，查看今日/明日/本周/下周课表，并支持开课前发送课程提醒，以及每日定时发送课表。",
-    "2.1.0",
+    PLUGIN_VERSION,
 )
 class CoursePlugin(Star):
     def __init__(self, context: Context, config=None):
@@ -420,8 +423,18 @@ class CoursePlugin(Star):
 
     @filter.command("课表帮助")
     async def help_cmd(self, event: AstrMessageEvent):
-        """输出本插件的全部指令说明。"""
-        yield event.plain_result(_help_text())
+        """输出本插件的全部指令说明(图片;渲染失败时退化为文字)及导出工具链接。"""
+        url = await self._render_schedule(
+            HELP_TMPL,
+            _help_render_data(),
+            options={"quality": self._cfg_int("render_quality", 100, 1)},
+        )
+        if url is None:
+            yield event.plain_result(_help_text())
+        else:
+            yield event.image_result(url)
+        # 长网址单独一条文本消息发出,保证客户端中可点击
+        yield event.plain_result(_HELP_TOOL_LINK)
 
     @filter.command("今日课表")
     async def today(self, event: AstrMessageEvent):
@@ -946,31 +959,75 @@ def _resolve_timezone(name: str):
 
 
 def _help_text() -> str:
-    """插件指令帮助文本(供 /课表帮助 输出)。"""
-    return "\n".join(
+    """插件指令帮助文本(供 /课表帮助 渲染失败时兜底)。"""
+    lines = ["📚 早安课表 · 指令列表", ""]
+    for name, commands in _HELP_SECTIONS:
+        lines.append(f"【{name}】")
+        lines.extend(f"{cmd}：{desc}" for cmd, desc in commands)
+        lines.append("")
+    lines.extend(_HELP_TIPS)
+    return "\n".join(lines)
+
+
+# 帮助内容结构化定义:文字兜底与图片渲染共用同一数据源
+_HELP_SECTIONS = [
+    (
+        "课表管理",
         [
-            "📚 早安课表 · 指令列表",
-            "",
-            "【课表管理】",
-            "/绑定课表：绑定个人课表（在 120 秒内发送 .ics 文件）",
-            "/删除课表：删除已绑定的课表",
-            "",
-            "【课表查询】",
-            "/今日课表：查看今日课程",
-            "/明日课表：查看明日课程",
-            "/本周课表：查看本周课程",
-            "/下周课表：查看下周课程",
-            "",
-            "【配置管理】",
-            "/设置每日推送：每日定时推送课表（回复“开启 HH:MM”或“关闭”）",
-            "/设置提醒时间：开课前提醒的提前分钟数（1～120）",
-            "/设置时区：设置课表时区（IANA 名称，默认东八区）",
-            "/查看设置：查看当前配置",
-            "",
-            "💡 课表 .ics 文件用「课表转日历」导出：https://wikilake.netlify.app/tools/%E8%AF%BE%E8%A1%A8%E8%BD%AC%E6%97%A5%E5%8E%86 ，再用 /绑定课表 上传。",
-            "📖 随时发送 /课表帮助 查看本列表。",
-        ]
-    )
+            ("/绑定课表", "绑定个人课表（在 120 秒内发送 .ics 文件）"),
+            ("/删除课表", "删除已绑定的课表"),
+        ],
+    ),
+    (
+        "课表查询",
+        [
+            ("/今日课表", "查看今日课程"),
+            ("/明日课表", "查看明日课程"),
+            ("/本周课表", "查看本周课程"),
+            ("/下周课表", "查看下周课程"),
+        ],
+    ),
+    (
+        "配置管理",
+        [
+            ("/设置每日推送", "每日定时推送课表（回复“开启 HH:MM”或“关闭”）"),
+            ("/设置提醒时间", "开课前提醒的提前分钟数（1～120）"),
+            ("/设置时区", "设置课表时区（IANA 名称，默认东八区）"),
+            ("/查看设置", "查看当前配置"),
+        ],
+    ),
+]
+
+_HELP_TIPS = [
+    "💡 课表 .ics 文件用「课表转日历」工具导出。",
+    "📖 随时发送 /课表帮助 查看本列表。",
+]
+
+# 工具链接单独一条消息发送:图片中的长链接无法点击,文本消息中的链接才可打开
+_HELP_TOOL_LINK = (
+    "🔗 课表转日历（导出 .ics 课表文件）：\n"
+    "https://wikilake.netlify.app/tools/%E8%AF%BE%E8%A1%A8%E8%BD%AC%E6%97%A5%E5%8E%86"
+)
+
+
+def _help_render_data() -> dict:
+    """构建 /课表帮助 的图片渲染数据。
+
+    数据带插件版本号:同版本内容不变 → 渲染缓存键相同 → 直接复用图片。
+    """
+    return {
+        "title": "早安课表 · 指令列表",
+        "version": PLUGIN_VERSION,
+        "sections": [
+            {
+                "name": name,
+                "commands": [{"cmd": cmd, "desc": desc} for cmd, desc in commands],
+            }
+            for name, commands in _HELP_SECTIONS
+        ],
+        "tips": list(_HELP_TIPS),
+        "page_width": 420,
+    }
 
 
 def _event_view(e: CourseEvent) -> Dict[str, str]:

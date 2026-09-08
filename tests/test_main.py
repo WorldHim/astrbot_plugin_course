@@ -6,12 +6,16 @@ import pytest
 
 from astrbot_plugin_course.course_types import CourseEvent
 from astrbot_plugin_course.main import (
+    PLUGIN_VERSION,
     _day_text_fallback,
     _event_view,
+    _help_render_data,
     _help_text,
+    _HELP_TOOL_LINK,
     _resolve_timezone,
     _week_text_fallback,
 )
+from conftest import FakeEvent
 
 
 def _event(minutes_offset: int = 10, **kwargs) -> CourseEvent:
@@ -231,4 +235,48 @@ class TestHelpText:
         for section in ["【课表管理】", "【课表查询】", "【配置管理】"]:
             assert section in text
         assert "课表转日历" in text  # 课表文件导出工具(WikiLake)提示
+
+
+class TestHelpCommand:
+    """帮助指令:图片渲染(同版本走缓存)与文字兜底。"""
+
+    def test_render_data_structure(self):
+        data = _help_render_data()
+        cmds = [c["cmd"] for s in data["sections"] for c in s["commands"]]
+        assert len(cmds) == 10
+        assert all(c.startswith("/") for c in cmds)
+        assert data["version"] == PLUGIN_VERSION  # 版本号进缓存键:同版本同图
+        assert data["title"]
+        assert len(data["sections"]) == 3
+
+    def test_help_cmd_renders_image_with_cache(self, plugin):
+        calls = []
+
+        async def fake_render(template, data, options=None):
+            calls.append(data)
+            return "http://fake/help.png"
+
+        async def run_help():
+            return [r async for r in plugin.help_cmd(FakeEvent("u1"))]
+
+        plugin.html_render = fake_render
+        r1 = asyncio.run(run_help())
+        r2 = asyncio.run(run_help())
+        assert r1 == [("image", "http://fake/help.png"), _HELP_TOOL_LINK]
+        assert r2 == r1
+        assert len(calls) == 1  # 同版本帮助内容相同 → 命中渲染缓存,只渲染一次
+
+    def test_help_cmd_falls_back_to_text(self, plugin):
+        async def bad_render(template, data, options=None):
+            raise RuntimeError("boom")
+
+        async def run_help():
+            return [r async for r in plugin.help_cmd(FakeEvent("u1"))]
+
+        plugin.html_render = bad_render
+        results = asyncio.run(run_help())
+        assert len(results) == 2
+        assert isinstance(results[0], str)
+        assert "/绑定课表" in results[0]  # 文字兜底包含指令列表
+        assert "wikilake" in results[1] and results[1] == _HELP_TOOL_LINK  # 链接单独成条(可点击)
 
