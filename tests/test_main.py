@@ -1,4 +1,5 @@
-"""main.py 轻量单元测试:配置读取、视图/兜底文案、时区解析。"""
+"""main.py 轻量单元测试:配置读取、视图/兜底文案、时区解析、渲染缓存。"""
+import asyncio
 from datetime import datetime, timedelta
 
 import pytest
@@ -102,3 +103,104 @@ class TestConfig:
     def test_none_value_falls_back(self, plugin):
         plugin._config = {"default_push_time": None}
         assert plugin._cfg("default_push_time", "07:00") == "07:00"
+
+
+class TestRenderCache:
+    """C16:渲染结果按内容 hash 缓存,相同内容复用图片。"""
+
+    DATA = {"title": "今日课表", "subtitle": "t | 2026-09-08", "courses": [], "page_width": 500}
+
+    def test_cache_hit_skips_render(self, plugin):
+        calls = []
+
+        async def fake_render(template, data, options=None):
+            calls.append(data)
+            return "http://fake/1.png"
+
+        plugin.html_render = fake_render
+        url1 = asyncio.run(plugin._render_schedule("T", dict(self.DATA)))
+        url2 = asyncio.run(plugin._render_schedule("T", dict(self.DATA)))
+        assert url1 == url2 == "http://fake/1.png"
+        assert len(calls) == 1  # 第二次命中缓存,未再渲染
+
+    def test_data_change_renders_again(self, plugin):
+        calls = []
+
+        async def fake_render(template, data, options=None):
+            calls.append(data)
+            return f"http://fake/{len(calls)}.png"
+
+        plugin.html_render = fake_render
+        asyncio.run(plugin._render_schedule("T", dict(self.DATA)))
+        changed = dict(self.DATA)
+        changed["subtitle"] = "t | 2026-09-15"  # 内容变化
+        asyncio.run(plugin._render_schedule("T", changed))
+        assert len(calls) == 2
+
+    def test_ttl_expiry_renders_again(self, plugin):
+        calls = []
+
+        async def fake_render(template, data, options=None):
+            calls.append(data)
+            return "http://fake/x.png"
+
+        plugin.html_render = fake_render
+        asyncio.run(plugin._render_schedule("T", dict(self.DATA)))
+        # 把唯一缓存条目的过期时间改到过去 → TTL 过期
+        for k, (exp, url) in plugin._render_cache.items():
+            plugin._render_cache[k] = (0, url)
+        asyncio.run(plugin._render_schedule("T", dict(self.DATA)))
+        assert len(calls) == 2  # 过期后重新渲染
+
+    def test_cache_disabled(self, plugin):
+        plugin._config = {"render_cache_minutes": 0}
+        calls = []
+
+        async def fake_render(template, data, options=None):
+            calls.append(data)
+            return "http://fake/x.png"
+
+        plugin.html_render = fake_render
+        asyncio.run(plugin._render_schedule("T", dict(self.DATA)))
+        asyncio.run(plugin._render_schedule("T", dict(self.DATA)))
+        assert len(calls) == 2  # 禁用缓存 → 每次都渲染
+        assert plugin._render_cache == {}
+
+    def test_failure_not_cached(self, plugin):
+        state = {"fail": True}
+        calls = []
+
+        async def flaky_render(template, data, options=None):
+            calls.append(data)
+            if state["fail"]:
+                raise RuntimeError("boom")
+            return "http://fake/ok.png"
+
+        plugin.html_render = flaky_render
+        assert asyncio.run(plugin._render_schedule("T", dict(self.DATA))) is None
+        state["fail"] = False
+        url = asyncio.run(plugin._render_schedule("T", dict(self.DATA)))
+        assert url == "http://fake/ok.png"  # 失败未缓存,恢复后成功
+        assert len(calls) == 2
+
+    def test_all_views_cached_independently(self, plugin):
+        """今日/明日/本周/下周四个视图各查两次:只渲染 4 次,且互不串缓存。"""
+        calls = []
+
+        async def fake_render(template, data, options=None):
+            calls.append((template, data["title"]))
+            return f"http://fake/{len(calls)}.png"
+
+        plugin.html_render = fake_render
+        views = [
+            ("DAY", {"title": "今日课表", "subtitle": "Alice | 2026-09-08", "courses": [], "page_width": 500}),
+            ("DAY", {"title": "明日课表", "subtitle": "Alice | 2026-09-09", "courses": [], "page_width": 500}),
+            ("WEEK", {"title": "本周课表", "subtitle": "Alice | 2026-09-07 ~ 2026-09-13", "courses": [], "page_width": 1280}),
+            ("WEEK", {"title": "下周课表", "subtitle": "Alice | 2026-09-14 ~ 2026-09-20", "courses": [], "page_width": 1280}),
+        ]
+        for tmpl, data in views:
+            asyncio.run(plugin._render_schedule(tmpl, dict(data)))
+            asyncio.run(plugin._render_schedule(tmpl, dict(data)))  # 重复查询 → 命中缓存
+        assert len(calls) == 4  # 每个视图只渲染一次
+        assert len(plugin._render_cache) == 4  # 四个视图各自独立缓存条目
+

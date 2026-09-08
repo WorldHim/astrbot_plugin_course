@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import shutil
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Optional, Set
@@ -42,6 +44,8 @@ class CoursePlugin(Star):
         self._stop_event = asyncio.Event()
         self._reminder_task: Optional[asyncio.Task[None]] = None
         self._initializing_lock = asyncio.Lock()
+        # 渲染结果缓存:内容 hash -> (过期时间戳, 图片 URL)
+        self._render_cache: Dict[str, tuple[float, str]] = {}
 
     def _cfg(self, key: str, default):
         """读取插件配置(WebUI 可调);未注入配置时使用默认值。"""
@@ -544,12 +548,38 @@ class CoursePlugin(Star):
         return series
 
     async def _render_schedule(self, template, data, options=None):
-        """渲染课表图片;失败(如 Playwright 未安装)时记录日志并返回 None。"""
+        """渲染课表图片;带内容 hash 缓存(可配置 TTL,0=禁用)。
+
+        渲染失败(如 Playwright 未安装)时记录日志并返回 None,
+        由调用方以文字课表兜底;失败结果不缓存。
+        """
+        cache_minutes = self._cfg_int("render_cache_minutes", 360, 0)
+        now_ts = time.time()
+        cache_key = hashlib.sha256(
+            (template + "\x00" + json.dumps(data, ensure_ascii=False, sort_keys=True))
+            .encode("utf-8")
+        ).hexdigest()
+
+        entry = self._render_cache.get(cache_key)
+        if cache_minutes > 0 and entry and entry[0] > now_ts:
+            return entry[1]
+
         try:
-            return await self.html_render(template, data, options=options or {})
+            url = await self.html_render(template, data, options=options or {})
         except Exception as e:
             logger.error(f"[course] html render failed: {e}")
             return None
+
+        if cache_minutes > 0 and url:
+            if len(self._render_cache) >= 128:
+                # 简单防膨胀:先清过期条目,仍超限则整体清空
+                expired = [k for k, v in self._render_cache.items() if v[0] <= now_ts]
+                for k in expired:
+                    self._render_cache.pop(k, None)
+                if len(self._render_cache) >= 128:
+                    self._render_cache.clear()
+            self._render_cache[cache_key] = (now_ts + cache_minutes * 60, url)
+        return url
 
     async def _send_day_schedule(self, event: AstrMessageEvent, *, day_offset: int):
         user_id = str(event.get_sender_id())

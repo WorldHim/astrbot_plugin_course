@@ -31,6 +31,12 @@
     "type": "int",
     "default": 100
   },
+  "render_cache_minutes": {
+    "description": "渲染结果缓存时长(分钟)",
+    "hint": "相同内容的课表在缓存期内直接复用图片,0 = 禁用缓存",
+    "type": "int",
+    "default": 360
+  },
   "day_render_width": {
     "description": "日课表渲染宽度(像素)",
     "type": "int",
