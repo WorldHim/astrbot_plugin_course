@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, time as dt_time, timedelta, timezone, tzinfo
 from functools import lru_cache
-from typing import List, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 from dateutil.rrule import rrulestr
 
@@ -139,3 +139,40 @@ def upcoming_within_15m(
         for e in expanded
         if not e.all_day
     ]
+
+
+def current_or_next_event(
+    series_list: Sequence[CourseSeries],
+    now: datetime,
+    tz: tzinfo = SHANGHAI_TZ,
+    search_days: int = 7,
+) -> Tuple[Optional[CourseEvent], Optional[CourseEvent]]:
+    """返回 (正在上的课, 下一节课),两者都可能为 None。
+
+    - current:开始于 now 之前且尚未结束的课程(向前多看一天,覆盖跨日课程);
+    - upcoming:开始时刻严格晚于 now 的最近一节(最多向后找 search_days 天);
+    - now 应为带时区的 datetime,内部统一转 UTC;事件时间已转为 tz 当地时间。
+    """
+    now_local = now.astimezone(tz)
+
+    current: Optional[CourseEvent] = None
+    for offset in (1, 0):
+        day = now_local.date() - timedelta(days=offset)
+        for e in day_events(series_list, day, tz):
+            if e.start_time <= now_local < e.end_time:
+                current = e
+                break
+        if current is not None:
+            break
+
+    upcoming: Optional[CourseEvent] = None
+    for offset in range(search_days):
+        day = now_local.date() + timedelta(days=offset)
+        for e in day_events(series_list, day, tz):
+            if e.start_time > now_local:
+                upcoming = e
+                break
+        if upcoming is not None:
+            break
+
+    return current, upcoming

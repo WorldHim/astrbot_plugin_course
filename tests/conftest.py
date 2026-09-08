@@ -165,9 +165,10 @@ class FakeContext:
 
 
 class FakeEvent:
-    def __init__(self, uid):
+    def __init__(self, uid, unified_msg_origin=None):
         self._uid = uid
         self.message_str = ""
+        self.unified_msg_origin = unified_msg_origin or f"test:{uid}"
 
     def get_sender_id(self):
         return self._uid

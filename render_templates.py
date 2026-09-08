@@ -381,3 +381,111 @@ HELP_TMPL = r"""
 </body>
 </html>
 """
+
+GROUP_TMPL = r"""
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width={{ page_width | default(480) }}, initial-scale=1" />
+  <style>
+    :root {
+      --bg: #ffffff;
+      --text-main: #1e293b;
+      --text-muted: #64748b;
+      --accent: #3b82f6;
+      --accent-soft: #eff6ff;
+      --card-bg: #f8fafc;
+      --border: #e2e8f0;
+      --live: #ef4444;
+      --live-soft: #fef2f2;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html { width: fit-content; background: var(--bg); }
+    body {
+      background: var(--bg);
+      font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+      width: {{ page_width | default(480) }}px;
+    }
+    .container { padding: 24px; background: var(--bg); }
+    .header {
+      margin-bottom: 18px;
+      padding-bottom: 14px;
+      border-bottom: 2px solid var(--accent-soft);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .header h1 { font-size: 22px; font-weight: 900; color: var(--text-main); }
+    .now-badge {
+      font-size: 13px; color: var(--accent); font-weight: 700;
+      background: var(--accent-soft); padding: 4px 12px; border-radius: 8px;
+    }
+    .stack { display: flex; flex-direction: column; gap: 14px; }
+    .group-card {
+      background: var(--card-bg); border: 1px solid var(--border);
+      border-radius: 16px; padding: 14px 16px;
+    }
+    .g-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+    .g-name { font-size: 18px; font-weight: 800; color: var(--text-main); }
+    .g-remain {
+      font-size: 12px; font-weight: 800; color: #fff;
+      background: var(--live); padding: 3px 10px; border-radius: 999px;
+    }
+    .g-meta { font-size: 13px; color: var(--text-muted); font-weight: 600; margin-bottom: 10px; }
+    .members { display: flex; flex-direction: column; }
+    .member {
+      display: flex; align-items: center; gap: 10px; padding: 7px 0;
+    }
+    .member + .member { border-top: 1px dashed var(--border); }
+    .avatar {
+      width: 34px; height: 34px; border-radius: 50%;
+      object-fit: cover; border: 1px solid var(--border); background: var(--accent-soft);
+    }
+    .m-name { font-size: 14px; font-weight: 700; color: var(--text-main); }
+    .live-dot { color: var(--live); font-weight: 800; margin-right: 6px; }
+    .empty {
+      background: var(--card-bg); border: 1px solid var(--border);
+      border-radius: 16px; padding: 22px; text-align: center;
+      font-size: 15px; font-weight: 700; color: var(--text-muted);
+    }
+    .idle {
+      margin-top: 16px; padding-top: 12px; border-top: 2px solid var(--accent-soft);
+      font-size: 13px; color: var(--text-muted); font-weight: 600; line-height: 1.6;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>📋 {{ title }}</h1>
+      <div class="now-badge">{{ now }}</div>
+    </div>
+    <div class="stack">
+      {% if groups %}
+        {% for g in groups %}
+          <div class="group-card">
+            <div class="g-head">
+              <span class="g-name"><span class="live">●</span> {{ g.summary }}</span>
+              {% if g.remain %}<span class="g-remain">还剩 {{ g.remain }}</span>{% endif %}
+            </div>
+            <div class="g-meta">{{ g.time }}{% if g.location %} · {{ g.location }}{% endif %}</div>
+            <div class="members">
+              {% for m in g.members %}
+                <div class="member">
+                  <img class="avatar" src="{{ m.avatar }}"
+                       onerror="this.onerror=null;this.style.visibility='hidden'" />
+                  <span class="m-name">{{ m.nickname }}</span>
+                </div>
+              {% endfor %}
+            </div>
+          </div>
+        {% endfor %}
+      {% else %}
+        <div class="empty">此刻本群没有成员正在上课</div>
+      {% endif %}
+    </div>
+  </div>
+</body>
+</html>
+"""

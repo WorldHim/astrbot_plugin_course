@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo
 
 from astrbot_plugin_course.schedule_engine import (
     SHANGHAI_TZ,
+    current_or_next_event,
     day_events,
     upcoming_within_15m,
     week_events,
@@ -28,7 +29,47 @@ def series(dtstart, summary="课", rrule=None, all_day=False, exdates=frozenset(
     )
 
 
-class TestDayEvents:
+class TestCurrentOrNext:
+    """current_or_next_event:正在上的课与下一节课的判定。"""
+
+    def test_current_ongoing(self):
+        now = datetime.now(SH)
+        s = series(now - timedelta(minutes=10), summary="正在上的课")
+        current, upcoming = current_or_next_event([s], now, SH)
+        assert current is not None and current.summary == "正在上的课"
+        assert upcoming is None  # 单次日程没有后续
+
+    def test_upcoming_today(self):
+        now = datetime.now(SH)
+        s = series(now + timedelta(minutes=30), summary="下一节课")
+        current, upcoming = current_or_next_event([s], now, SH)
+        assert current is None
+        assert upcoming is not None and upcoming.summary == "下一节课"
+
+    def test_upcoming_rrule_next_day(self):
+        tomorrow_8am = (
+            datetime.now(SH) + timedelta(days=1)
+        ).replace(hour=8, minute=0, second=0, microsecond=0)
+        s = series(tomorrow_8am, summary="明早的课", rrule="FREQ=DAILY")
+        current, upcoming = current_or_next_event([s], datetime.now(SH), SH)
+        assert current is None
+        assert upcoming is not None and upcoming.summary == "明早的课"
+        assert upcoming.start_time.date() == tomorrow_8am.date()
+
+    def test_nothing_within_search_days(self):
+        s = series(datetime.now(SH) + timedelta(days=10))
+        current, upcoming = current_or_next_event(
+            [s], datetime.now(SH), SH, search_days=7
+        )
+        assert current is None and upcoming is None
+
+    def test_ongoing_across_midnight(self):
+        """昨天 23:30 开始、95 分钟长的课,今天 00:25 仍判定为"正在上"。"""
+        now = datetime(2026, 9, 8, 0, 25, tzinfo=SH)
+        s = series(datetime(2026, 9, 7, 23, 30, tzinfo=SH))
+        current, _ = current_or_next_event([s], now, SH)
+        assert current is not None and current.summary == "课"
+
     def test_single_day_occurrence(self):
         s = series(datetime(2026, 9, 7, 10, 40, tzinfo=SH))
         assert len(day_events([s], date(2026, 9, 7))) == 1

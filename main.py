@@ -7,7 +7,7 @@ import shutil
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Optional, Set
+from typing import Dict, Optional, Sequence, Set
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
@@ -23,8 +23,14 @@ from astrbot.core.utils.session_waiter import (
 
 from .course_types import CourseEvent, CourseSeries, SHANGHAI_TZ, UserBinding
 from .ics_parser import IcsParser
-from .render_templates import DAY_TMPL, HELP_TMPL, WEEK_TMPL
-from .schedule_engine import day_events, upcoming_within_15m, week_events, week_start
+from .render_templates import DAY_TMPL, GROUP_TMPL, HELP_TMPL, WEEK_TMPL
+from .schedule_engine import (
+    current_or_next_event,
+    day_events,
+    upcoming_within_15m,
+    week_events,
+    week_start,
+)
 from .storage import CourseStorage
 
 
@@ -535,6 +541,106 @@ class CoursePlugin(Star):
             return
         yield event.image_result(url)
 
+    @filter.command("当前课程")
+    async def group_schedule(self, event: AstrMessageEvent):
+        """看看本群现在都有谁在上课(头像+课程图片)。"""
+        now_utc = datetime.now(timezone.utc)
+        bindings = self._storage.load_bindings()
+        members = [
+            b
+            for b in bindings.values()
+            if b.unified_msg_origin == event.unified_msg_origin
+        ]
+        if not members:
+            yield event.plain_result(
+                "本群还没有人绑定课表。发送 /绑定课表 绑定后即可使用本指令。"
+            )
+            return
+
+        data = self._collect_group_now(members, now_utc)
+        url = await self._render_schedule(
+            GROUP_TMPL,
+            data,
+            options={"quality": self._cfg_int("render_quality", 100, 1)},
+        )
+        if url is None:
+            yield event.plain_result(_group_now_text(data))
+            return
+        yield event.image_result(url)
+
+    def _collect_group_now(
+        self, members: Sequence[UserBinding], now_utc: datetime
+    ) -> dict:
+        """收集群成员"此刻正在上"的课程并按课程分组(含头像)。
+
+        返回渲染/文字兜底共用的数据结构;当前没在上课的成员不输出。
+        groups: 同一时刻上同一门课的成员聚合为一组。
+        """
+        groups: Dict[tuple, dict] = {}
+        for binding in members:
+            series = self._load_series(binding)
+            if series is None:
+                continue
+            user_tz = binding.get_timezone()
+            current, _ = current_or_next_event(
+                series, now_utc, user_tz, search_days=0
+            )
+            if current is None:
+                continue
+
+            nickname = binding.nickname or binding.user_id
+            key = (current.summary, current.location, current.start_time.isoformat())
+            group = groups.setdefault(
+                key,
+                {
+                    "summary": current.summary,
+                    "location": current.location or "",
+                    "start": current.start_time,
+                    "end": current.end_time,
+                    "all_day": current.all_day,
+                    "members": [],
+                },
+            )
+            group["members"].append(
+                {
+                    "nickname": nickname,
+                    "avatar": (
+                        f"https://q1.qlogo.cn/g?b=qq&nk={binding.user_id}&s=100"
+                    ),
+                }
+            )
+
+        course_groups: List[dict] = []
+        for g in sorted(groups.values(), key=lambda x: x["start"]):
+            if g["all_day"]:
+                time_part = "全天"
+                remain = ""
+            else:
+                time_part = (
+                    f"{g['start'].strftime('%H:%M')} - {g['end'].strftime('%H:%M')}"
+                )
+                remain = _format_in_minutes(
+                    int((g["end"] - now_utc).total_seconds() // 60)
+                )
+            course_groups.append(
+                {
+                    "summary": g["summary"],
+                    "location": g["location"],
+                    "time": time_part,
+                    "remain": remain,
+                    "members": sorted(
+                        g["members"], key=lambda m: m["nickname"]
+                    ),
+                }
+            )
+        return {
+            "title": "本群正在上的课",
+            "now": now_utc.astimezone(SHANGHAI_TZ).strftime("%m-%d %H:%M"),
+            "groups": course_groups,
+            "page_width": 480,
+        }
+
+
     @filter.command("下周课表")
     async def next_week(self, event: AstrMessageEvent):
         user_id = str(event.get_sender_id())
@@ -1030,6 +1136,7 @@ _HELP_SECTIONS = [
             ("/明日课表", "查看明日课程"),
             ("/本周课表", "查看本周课程"),
             ("/下周课表", "查看下周课程"),
+            ("/当前课程", "看看本群现在都在上什么课(图片)"),
         ],
     ),
     (
@@ -1073,6 +1180,42 @@ def _help_render_data() -> dict:
         "tips": list(_HELP_TIPS),
         "page_width": 420,
     }
+
+
+def _course_label(e: CourseEvent) -> str:
+    """课程速览用的一行标签:课程名(地点)。"""
+    if e.location:
+        return f"{e.summary}（{e.location}）"
+    return e.summary
+
+
+def _group_now_text(data: dict) -> str:
+    """/当前课程 的文字版兜底(图片渲染失败时发送)。"""
+    lines = [f"📋 本群正在上的课({data['now']})"]
+    for g in data["groups"]:
+        lines.append("")
+        who = "、".join(m["nickname"] for m in g["members"])
+        remain = f"（还剩 {g['remain']}）" if g["remain"] else ""
+        loc = f"（{g['location']}）" if g["location"] else ""
+        lines.append(f"🔴 {g['summary']}{loc} {g['time']}{remain}")
+        lines.append(who)
+    if not data["groups"]:
+        lines.append("此刻本群没有成员正在上课。")
+    return "\n".join(lines)
+
+
+def _format_in_minutes(total: int) -> str:
+    """把分钟数转成人话:45 分钟 / 1 小时 30 分 / 2 天 3 小时。"""
+    total = max(1, total)
+    if total < 60:
+        return f"{total} 分钟"
+    hours, mins = divmod(total, 60)
+    if hours < 24:
+        return f"{hours} 小时 {mins} 分" if mins else f"{hours} 小时"
+    days, hours = divmod(hours, 24)
+    if hours:
+        return f"{days} 天 {hours} 小时"
+    return f"{days} 天"
 
 
 def _event_view(e: CourseEvent) -> Dict[str, str]:

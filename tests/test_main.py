@@ -1,6 +1,6 @@
 """main.py 轻量单元测试:配置读取、视图/兜底文案、时区解析、渲染缓存。"""
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -10,6 +10,7 @@ from astrbot_plugin_course.main import (
     _SenderSessionFilter,
     _day_text_fallback,
     _event_view,
+    _group_now_text,
     _help_render_data,
     _help_text,
     _HELP_TOOL_LINK,
@@ -236,6 +237,7 @@ class TestHelpText:
             "明日课表",
             "本周课表",
             "下周课表",
+            "当前课程",
             "设置每日推送",
             "设置提醒时间",
             "设置时区",
@@ -256,7 +258,7 @@ class TestHelpCommand:
     def test_render_data_structure(self):
         data = _help_render_data()
         cmds = [c["cmd"] for s in data["sections"] for c in s["commands"]]
-        assert len(cmds) == 10
+        assert len(cmds) == 11
         assert all(c.startswith("/") for c in cmds)
         assert data["version"] == PLUGIN_VERSION  # 版本号进缓存键:同版本同图
         assert data["title"]
@@ -381,4 +383,179 @@ class TestSenderSessionFilter:
         a = f.filter(self._event("aiocqhttp:FriendMessage:123", "u1"))
         b = f.filter(self._event("aiocqhttp:GroupMessage:123", "u1"))
         assert a != b  # 私聊与群聊隔离
+
+
+class TestGroupSchedule:
+    """/群课表:按课程分组展示本群成员此刻正在上的课(头像)。"""
+
+    @staticmethod
+    def _run(plugin, evt):
+        async def run():
+            return [r async for r in plugin.group_schedule(evt)]
+
+        return asyncio.run(run())
+
+    @staticmethod
+    def _binding(uid, nickname, umo):
+        b = make_binding(uid)
+        b.nickname = nickname
+        b.unified_msg_origin = umo
+        return b
+
+    def test_no_members_hints_bind(self, plugin):
+        results = self._run(
+            plugin, FakeEvent("x", unified_msg_origin="group:1")
+        )
+        assert len(results) == 1
+        assert "本群还没有人绑定课表" in results[0]
+
+    def test_collect_groups_by_course_with_avatar(self, plugin):
+        from astrbot_plugin_course.course_types import CourseSeries, SHANGHAI_TZ as SH
+
+        now_sh = datetime.now(SH)
+        ongoing = [
+            CourseSeries(
+                summary="高等数学",
+                dtstart=now_sh - timedelta(minutes=10),
+                duration=timedelta(minutes=45),
+                location="明理楼302",
+            )
+        ]
+        plugin._storage.save_bindings(
+            {
+                "u1": self._binding("u1", "Alice", "group:1"),
+                "u2": self._binding("u2", "Bob", "group:1"),
+                "u3": self._binding("u3", "Carol", "group:1"),
+            }
+        )
+        # u3 没课
+        plugin._load_series = lambda b: ongoing if b.user_id != "u3" else []
+
+        data = plugin._collect_group_now(
+            list(plugin._storage.load_bindings().values()),
+            datetime.now(timezone.utc),
+        )
+        assert len(data["groups"]) == 1
+        g = data["groups"][0]
+        assert g["summary"] == "高等数学"
+        assert g["location"] == "明理楼302"
+        assert [m["nickname"] for m in g["members"]] == ["Alice", "Bob"]
+        assert g["members"][0]["avatar"] == "https://q1.qlogo.cn/g?b=qq&nk=u1&s=100"
+        assert "还剩" in g["remain"] or g["remain"].endswith("分钟")
+
+    def test_same_course_members_merged_into_one_group(self, plugin):
+        from astrbot_plugin_course.course_types import CourseSeries, SHANGHAI_TZ as SH
+
+        now_sh = datetime.now(SH)
+        same = [
+            CourseSeries(
+                summary="同一门课",
+                dtstart=now_sh - timedelta(minutes=5),
+                duration=timedelta(minutes=95),
+            )
+        ]
+        plugin._storage.save_bindings(
+            {
+                "u1": self._binding("u1", "Alice", "group:1"),
+                "u2": self._binding("u2", "Bob", "group:1"),
+            }
+        )
+        plugin._load_series = lambda b: same
+
+        data = plugin._collect_group_now(
+            list(plugin._storage.load_bindings().values()),
+            datetime.now(timezone.utc),
+        )
+        assert len(data["groups"]) == 1  # 同课同时刻 → 聚合为一组
+        assert len(data["groups"][0]["members"]) == 2
+
+    def test_renders_image_with_fallback_text(self, plugin):
+        from astrbot_plugin_course.course_types import CourseSeries, SHANGHAI_TZ as SH
+
+        now_sh = datetime.now(SH)
+        ongoing = [
+            CourseSeries(
+                summary="高等数学",
+                dtstart=now_sh - timedelta(minutes=10),
+                duration=timedelta(minutes=45),
+                location="E13",
+            )
+        ]
+        plugin._storage.save_bindings(
+            {"u1": self._binding("u1", "Alice", "group:1")}
+        )
+        plugin._load_series = lambda b: ongoing
+
+        # 渲染成功 → 图片
+        async def ok_render(template, data, options=None):
+            return "http://fake/group.png"
+
+        plugin.html_render = ok_render
+        results = self._run(
+            plugin, FakeEvent("x", unified_msg_origin="group:1")
+        )
+        assert results == [("image", "http://fake/group.png")]
+
+        # 渲染失败 → 文字兜底(同源数据);先清渲染缓存避免命中上次结果
+        plugin._render_cache.clear()
+
+        async def bad_render(template, data, options=None):
+            raise RuntimeError("boom")
+
+        plugin.html_render = bad_render
+        results = self._run(
+            plugin, FakeEvent("x", unified_msg_origin="group:1")
+        )
+        text = results[0]
+        assert "高等数学" in text and "Alice" in text
+        assert "还剩" in text
+
+    def test_idle_member_not_shown(self, plugin):
+        """没在上课的成员不出现在输出中。"""
+        from astrbot_plugin_course.course_types import CourseSeries, SHANGHAI_TZ as SH
+
+        now_sh = datetime.now(SH)
+        ongoing = [
+            CourseSeries(
+                summary="正在上的课",
+                dtstart=now_sh - timedelta(minutes=10),
+                duration=timedelta(minutes=45),
+            )
+        ]
+        plugin._storage.save_bindings(
+            {
+                "u1": self._binding("u1", "Alice", "group:1"),
+                "u2": self._binding("u2", "IdleBob", "group:1"),  # 没课
+            }
+        )
+        plugin._load_series = lambda b: ongoing if b.user_id == "u1" else []
+
+        data = plugin._collect_group_now(
+            list(plugin._storage.load_bindings().values()),
+            datetime.now(timezone.utc),
+        )
+        assert [m["nickname"] for m in data["groups"][0]["members"]] == ["Alice"]
+        text = _group_now_text(data)
+        assert "IdleBob" not in text  # 没课成员完全不显示
+
+    def test_member_with_broken_series_goes_idle(self, plugin):
+        plugin._storage.save_bindings(
+            {"u1": self._binding("u1", "Alice", "group:1")}
+        )
+        plugin._load_series = lambda b: None
+        data = plugin._collect_group_now(
+            list(plugin._storage.load_bindings().values()),
+            datetime.now(timezone.utc),
+        )
+        assert data["groups"] == []  # 读取失败等同没课:不显示,仅剩空态
+
+    def test_other_group_members_excluded(self, plugin):
+        plugin._storage.save_bindings(
+            {"u1": self._binding("u1", "Alice", "group:1")}
+        )
+        results = self._run(
+            plugin, FakeEvent("x", unified_msg_origin="group:2")
+        )
+        assert "本群还没有人绑定课表" in results[0]
+        assert "Alice" not in results[0]
 
