@@ -205,9 +205,14 @@ class CoursePlugin(Star):
 
         await self._unregister_user_cron(user_id)
 
+        binding = self._storage.get_binding(user_id)
         ok = self._storage.delete_binding(user_id)
-        self._reminded.pop(user_id, None)
         if ok:
+            # 顺带清除该课表的解析缓存，避免已删除文件的缓存条目常驻内存
+            if binding:
+                ics_path = (self._storage._base_dir / binding.ics_file).resolve()
+                self._parser.clear_cache(str(ics_path))
+            self._reminded.pop(user_id, None)
             yield event.plain_result("已删除课表。")
         else:
             yield event.plain_result("你还没有绑定课表。")
