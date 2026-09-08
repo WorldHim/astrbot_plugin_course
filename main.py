@@ -28,7 +28,7 @@ from .storage import CourseStorage
     "astrbot_plugin_course",
     "WorldHim",
     "绑定个人课表，查看今日/明日/本周/下周课表，并支持开课前发送课程提醒，以及每日定时发送课表。",
-    "2.0.0",
+    "2.1.0",
 )
 class CoursePlugin(Star):
     def __init__(self, context: Context, config=None):
