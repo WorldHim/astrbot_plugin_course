@@ -92,14 +92,18 @@ class CoursePlugin(Star):
             self._reminder_task = asyncio.create_task(self._reminder_loop())
             logger.info("[course] new reminder task created")
 
-        # 注册用户的每日推送任务（在锁外执行，避免阻塞）
+        # 注册用户的每日推送任务（在锁外执行，避免阻塞；并发注册，启动耗时与用户数无关）
         bindings = self._storage.load_bindings()
-        for user_id, binding in bindings.items():
-            if binding.enable_daily_push and binding.daily_push_time:
-                try:
-                    await self._register_user_cron(user_id, binding.daily_push_time)
-                except Exception as e:
-                    logger.error(f"[course] failed to register cron for user {user_id}: {e}")
+        tasks = [
+            self._register_user_cron(user_id, binding.daily_push_time)
+            for user_id, binding in bindings.items()
+            if binding.enable_daily_push and binding.daily_push_time
+        ]
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error(f"[course] failed to register cron: {result!r}")
 
     async def terminate(self):
         logger.info("[course] terminating reminder system...")
