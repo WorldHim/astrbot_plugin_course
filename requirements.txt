@@ -1,3 +1,4 @@
-icalendar
-python-dateutil
-tzdata
+# 版本下限 = 当前开发环境验证通过的版本,防止上游破坏性变更静默影响插件
+icalendar>=7.3.0
+python-dateutil>=2.9.0
+tzdata>=2026.3
