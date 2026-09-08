@@ -454,7 +454,7 @@ class CoursePlugin(Star):
 
         title = f"本周课表"
         subtitle = f"{binding.nickname} | {start.strftime('%Y-%m-%d')} ~ {(start + timedelta(days=6)).strftime('%Y-%m-%d')}"
-        url = await self.html_render(
+        url = await self._render_schedule(
             WEEK_TMPL,
             {
                 "title": title,
@@ -464,6 +464,10 @@ class CoursePlugin(Star):
             },
             options={"quality": self._cfg_int("render_quality", 100, 1)},
         )
+        if url is None:
+            # 图片渲染失败(如 Playwright 未安装),退化为文字课表
+            yield event.plain_result(_week_text_fallback(title, subtitle, days))
+            return
         yield event.image_result(url)
 
     @filter.command("下周课表")
@@ -501,7 +505,7 @@ class CoursePlugin(Star):
 
         title = f"下周课表"
         subtitle = f"{binding.nickname} | {start.strftime('%Y-%m-%d')} ~ {(start + timedelta(days=6)).strftime('%Y-%m-%d')}"
-        url = await self.html_render(
+        url = await self._render_schedule(
             WEEK_TMPL,
             {
                 "title": title,
@@ -511,6 +515,10 @@ class CoursePlugin(Star):
             },
             options={"quality": self._cfg_int("render_quality", 100, 1)},
         )
+        if url is None:
+            # 图片渲染失败(如 Playwright 未安装),退化为文字课表
+            yield event.plain_result(_week_text_fallback(title, subtitle, days))
+            return
         yield event.image_result(url)
 
     def _load_series(self, binding: UserBinding) -> Optional[list[CourseSeries]]:
@@ -528,6 +536,14 @@ class CoursePlugin(Star):
                 f"[course] failed to load ics for user {binding.user_id}: {ics_path}"
             )
         return series
+
+    async def _render_schedule(self, template, data, options=None):
+        """渲染课表图片;失败(如 Playwright 未安装)时记录日志并返回 None。"""
+        try:
+            return await self.html_render(template, data, options=options or {})
+        except Exception as e:
+            logger.error(f"[course] html render failed: {e}")
+            return None
 
     async def _send_day_schedule(self, event: AstrMessageEvent, *, day_offset: int):
         user_id = str(event.get_sender_id())
@@ -551,7 +567,7 @@ class CoursePlugin(Star):
         title = "今日课表" if day_offset == 0 else "明日课表"
         subtitle = f"{binding.nickname} | {target.strftime('%Y-%m-%d')}"
         courses = [_event_view(e) for e in day_list]
-        url = await self.html_render(
+        url = await self._render_schedule(
             DAY_TMPL,
             {
                 "title": title,
@@ -561,6 +577,10 @@ class CoursePlugin(Star):
             },
             options={"quality": self._cfg_int("render_quality", 100, 1)},
         )
+        if url is None:
+            # 图片渲染失败(如 Playwright 未安装),退化为文字课表
+            yield event.plain_result(_day_text_fallback(title, subtitle, courses))
+            return
         yield event.image_result(url)
 
     async def _register_user_cron(self, user_id: str, time_str: str) -> None:
@@ -662,7 +682,7 @@ class CoursePlugin(Star):
             title = "今日课表"
             subtitle = f"{binding.nickname} | {today.strftime('%Y-%m-%d')}"
             courses = [_event_view(e) for e in day_list]
-            url = await self.html_render(
+            url = await self._render_schedule(
                 DAY_TMPL,
                 {
                     "title": title,
@@ -672,8 +692,17 @@ class CoursePlugin(Star):
                 },
                 options={"quality": self._cfg_int("render_quality", 100, 1)},
             )
-
             session = MessageSession.from_str(binding.unified_msg_origin)
+            if url is None:
+                # 渲染失败,退化为文字课表,保证每日推送仍有内容
+                text = _day_text_fallback(title, subtitle, courses)
+                chain = MessageChain().message(text)
+                await self._context.send_message(session, chain)
+                logger.info(
+                    f"[course] daily push sent as text for user {user_id} (render failed)"
+                )
+                return
+
             chain = MessageChain([Image.fromURL(url)])
             await self._context.send_message(session, chain)
             logger.info(f"[course] daily push sent to user {user_id}")
@@ -788,6 +817,39 @@ class CoursePlugin(Star):
             else:
                 self._reminded.pop(user_id, None)
         return changed
+
+
+def _courses_lines(courses) -> List[str]:
+    """把课程 dict 列表格式化为文字行(渲染失败时的兜底展示)。"""
+    lines = []
+    for c in courses:
+        loc = f" @{c.get('location')}" if c.get("location") else ""
+        lines.append(f"{c['time_range']}  {c['summary']}{loc}")
+    return lines
+
+
+def _day_text_fallback(title: str, subtitle: str, courses) -> str:
+    """日课表的文字版兜底(图片渲染失败时发给用户)。"""
+    lines = [f"🖼️ 图片渲染失败，以下为文字版课表：", f"📅 {title}({subtitle})"]
+    if not courses:
+        lines.append("今日暂无课程，享受生活吧~")
+    else:
+        lines.extend(_courses_lines(courses))
+    return "\n".join(lines)
+
+
+def _week_text_fallback(title: str, subtitle: str, days) -> str:
+    """周课表的文字版兜底(图片渲染失败时发给用户)。"""
+    lines = [f"🖼️ 图片渲染失败，以下为文字版课表：", f"📅 {title}({subtitle})"]
+    for day in days:
+        day_lines = _courses_lines(day["courses"])
+        head = f"【{day['label']} {day['date']}{' · 今天' if day.get('is_today') else ''}】"
+        if day_lines:
+            lines.append(head)
+            lines.extend(day_lines)
+        else:
+            lines.append(f"{head} 无课")
+    return "\n".join(lines)
 
 
 def _resolve_timezone(name: str):
