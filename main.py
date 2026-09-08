@@ -741,7 +741,7 @@ class CoursePlugin(Star):
                     "rank": i + 1,
                     "nickname": r["nickname"],
                     "avatar": r["avatar"],
-                    "total": _format_in_minutes(r["seconds"] // 60),
+                    "total": _format_rank_total(r["seconds"] // 60),
                     "count": r["count"],
                 }
                 for i, r in enumerate(rows)
@@ -1267,6 +1267,21 @@ def _format_in_minutes(total: int) -> str:
     if hours:
         return f"{days} 天 {hours} 小时"
     return f"{days} 天"
+
+
+def _format_rank_total(total: int) -> str:
+    """上课时长榜的总时长格式:一律按小时结算,不进位到天。
+
+    与 _format_in_minutes(剩余时间"还剩 X")不同——榜单里"2 天"没有
+    直觉意义,统一显示为累计小时数:45 分钟 / 3 小时 10 分 / 26 小时。
+    """
+    total = max(1, total)
+    if total < 60:
+        return f"{total} 分钟"
+    hours, mins = divmod(total, 60)
+    if mins:
+        return f"{hours} 小时 {mins} 分"
+    return f"{hours} 小时"
 
 
 def _event_view(e: CourseEvent) -> Dict[str, str]:

@@ -11,6 +11,7 @@ from astrbot_plugin_course.main import (
     _SenderSessionFilter,
     _day_text_fallback,
     _event_view,
+    _format_rank_total,
     _group_now_text,
     _resolve_timezone,
     _study_rank_text,
@@ -774,4 +775,39 @@ class TestStudyRank:
         )
         text = _study_rank_text(data)
         assert "本榜周期内暂无上课记录" in text
+
+    def test_total_never_advances_to_days(self, plugin):
+        """榜单总时长一律按小时结算,不进位到天。"""
+        from datetime import time as dt_time
+
+        from astrbot_plugin_course.schedule_engine import week_start
+
+        assert _format_rank_total(45) == "45 分钟"
+        assert _format_rank_total(60) == "1 小时"
+        assert _format_rank_total(25 * 60) == "25 小时"
+        assert _format_rank_total(26 * 60 + 30) == "26 小时 30 分"
+
+        # 周榜集成:每天 4 节 95 分钟,整周 2660 分钟 → "44 小时 20 分"
+        monday = week_start(datetime.now(SHANGHAI_TZ).date())
+        courses = [
+            CourseSeries(
+                summary=f"课{i}",
+                dtstart=datetime.combine(
+                    monday, dt_time(h, 0), tzinfo=SHANGHAI_TZ
+                ),
+                duration=timedelta(minutes=95),
+                rrule_text="FREQ=DAILY",
+            )
+            for i, h in enumerate((8, 10, 14, 16))
+        ]
+        plugin._storage.save_bindings({"u1": self._binding("u1", "Alice")})
+        plugin._load_series = lambda b: courses
+
+        data = plugin._collect_study_rank(
+            list(plugin._storage.load_bindings().values()),
+            datetime.now(timezone.utc),
+            "周",
+        )
+        assert data["rows"][0]["total"] == "44 小时 20 分"
+        assert "天" not in data["rows"][0]["total"]
 
