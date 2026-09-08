@@ -49,7 +49,7 @@ class _SenderSessionFilter(SessionFilter):
         return f"{event.unified_msg_origin}|{event.get_sender_id()}"
 
 # 插件版本(@register 与帮助图片共用;metadata.yaml 的 version 需保持一致)
-PLUGIN_VERSION = "2.6.0"
+PLUGIN_VERSION = "2.6.1"
 
 # 星期几的中文标签(周课表与上课时长榜共用)
 _WEEKDAY_NAMES = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
