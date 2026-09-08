@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -29,15 +30,14 @@ class CourseStorage:
             safe_name = "user"
         return self._ics_dir / f"{safe_name}.ics"
 
-    def load_bindings(self) -> Dict[str, UserBinding]:
-        if not self._bindings_file.exists():
-            return {}
-        try:
-            raw = json.loads(self._bindings_file.read_text(encoding="utf-8"))
-            bindings: Dict[str, UserBinding] = {}
-            for user_id, item in raw.get("bindings", {}).items():
-                if not isinstance(item, dict):
-                    continue
+    def _read_bindings_json(self, path: Path) -> Dict[str, UserBinding]:
+        """解析绑定文件;缺失/损坏时抛异常(由调用方决定是否回退备份)。"""
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        bindings: Dict[str, UserBinding] = {}
+        for user_id, item in raw.get("bindings", {}).items():
+            if not isinstance(item, dict):
+                continue
+            try:
                 bindings[user_id] = UserBinding(
                     user_id=user_id,
                     unified_msg_origin=str(item.get("unified_msg_origin", "")),
@@ -52,10 +52,46 @@ class CourseStorage:
                     daily_push_job_id=str(item.get("daily_push_job_id", "")),
                     timezone_name=str(item.get("timezone_name", "Asia/Shanghai")),
                 )
-            return bindings
-        except Exception as e:
-            logger.error(f"[course] Failed to load bindings.json: {e}")
+            except Exception as e:
+                logger.warning(f"[course] skip invalid binding for {user_id}: {e}")
+                continue
+        return bindings
+
+    def load_bindings(self) -> Dict[str, UserBinding]:
+        """加载绑定;主文件损坏时自动从 .bak 备份恢复并告警。"""
+        main_path = self._bindings_file
+        bak_path = self._bindings_file.with_suffix(".json.bak")
+
+        if main_path.exists():
+            try:
+                return self._read_bindings_json(main_path)
+            except Exception as e:
+                logger.error(
+                    f"[course] bindings.json is corrupted, trying backup: {e}"
+                )
+        else:
+            logger.info("[course] bindings.json not found, trying backup...")
+
+        if not bak_path.exists():
+            logger.warning("[course] no bindings backup available")
             return {}
+
+        try:
+            restored = self._read_bindings_json(bak_path)
+        except Exception as e:
+            logger.error(f"[course] bindings backup is also corrupted: {e}")
+            return {}
+
+        logger.warning(
+            f"[course] restored {len(restored)} bindings from backup "
+            f"({bak_path.name})"
+        )
+        try:
+            # 用备份恢复主文件,避免下次仍读到坏文件
+            shutil.copyfile(bak_path, main_path)
+        except Exception as e:
+            logger.warning(f"[course] failed to copy backup to main file: {e}")
+        return restored
 
     def load_reminded(self) -> Dict[str, Set[str]]:
         """加载已提醒记录(开课提醒去重);文件缺失或损坏时返回空记录。"""
@@ -99,12 +135,23 @@ class CourseStorage:
             "updated_at_ts": time.time(),
             "bindings": {uid: asdict(b) for uid, b in bindings.items()},
         }
+        tmp_path = self._bindings_file.with_suffix(".json.tmp")
+        bak_path = self._bindings_file.with_suffix(".json.bak")
         try:
-            self._bindings_file.write_text(
+            tmp_path.write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
             )
+            # 轮转备份:保留上一版数据,供主文件损坏时恢复
+            if self._bindings_file.exists():
+                shutil.copyfile(self._bindings_file, bak_path)
+            # 临时文件 + replace 原子写,避免写一半崩溃导致文件损坏
+            tmp_path.replace(self._bindings_file)
         except Exception as e:
             logger.error(f"[course] Failed to save bindings.json: {e}")
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     def delete_binding(self, user_id: str) -> bool:
         bindings = self.load_bindings()
