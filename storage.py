@@ -10,7 +10,7 @@ from typing import Dict, Optional, Set
 from astrbot.api import logger
 from astrbot.api.star import StarTools
 
-from .course_types import UserBinding
+from .course_types import UserBinding, decode_bytes_to_text
 
 
 class CourseStorage:
@@ -37,8 +37,15 @@ class CourseStorage:
         return (self._base_dir / binding.ics_file).resolve()
 
     def _read_bindings_json(self, path: Path) -> Dict[str, UserBinding]:
-        """解析绑定文件;缺失/损坏时抛异常(由调用方决定是否回退备份)。"""
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        """解析绑定文件;缺失/损坏/编码不支持时抛异常(由调用方决定是否回退备份)。
+
+        编码自动识别(UTF-8 ±BOM / UTF-16 / GBK→统一转为 UTF-8 文本),
+        兼容手工编辑(如 Windows 记事本 ANSI/UTF-16 保存)的文件。
+        """
+        raw_text = decode_bytes_to_text(path.read_bytes())
+        if raw_text is None:
+            raise ValueError("unsupported file encoding")
+        raw = json.loads(raw_text)
         bindings: Dict[str, UserBinding] = {}
         for user_id, item in raw.get("bindings", {}).items():
             if not isinstance(item, dict):
@@ -129,7 +136,11 @@ class CourseStorage:
         if not self._reminded_file.exists():
             return {}
         try:
-            raw = json.loads(self._reminded_file.read_text(encoding="utf-8"))
+            # 编码自动识别(含 GBK/UTF-16),统一转为 UTF-8 文本
+            raw_text = decode_bytes_to_text(self._reminded_file.read_bytes())
+            if raw_text is None:
+                raise ValueError("unsupported file encoding")
+            raw = json.loads(raw_text)
             reminded: Dict[str, Set[str]] = {}
             for uid, keys in raw.get("reminded", {}).items():
                 if not isinstance(keys, list):

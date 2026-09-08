@@ -8,7 +8,7 @@ from astrbot.api import logger
 from icalendar import Calendar
 from dateutil.rrule import rrulestr
 
-from .course_types import CourseSeries, SHANGHAI_TZ
+from .course_types import CourseSeries, SHANGHAI_TZ, decode_bytes_to_text
 
 _UTC = timezone.utc
 
@@ -93,9 +93,16 @@ class IcsParser:
             return cached[1]
 
         try:
-            cal_content = Path(file_path).read_text(encoding="utf-8")
+            raw = Path(file_path).read_bytes()
         except Exception as e:
             logger.error(f"[course] cannot read ics: {e}")
+            return None
+
+        cal_content = decode_bytes_to_text(raw)
+        if cal_content is None:
+            logger.error(
+                f"[course] ics file {file_path} uses an unsupported encoding"
+            )
             return None
 
         try:

@@ -47,6 +47,51 @@ class TestParseErrors:
         p.write_text("this is not a calendar", encoding="utf-8")
         assert self.parser.parse_ics_file(str(p)) is None
 
+    def test_utf8_bom_parsed(self, tmp_path):
+        # 部分 .ics 导出工具(及 Windows 记事本)会写 UTF-8 BOM,须能正常解析
+        p = tmp_path / "bom.ics"
+        content = "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//t//CN\n" + vevent(summary="高数") + "END:VCALENDAR\n"
+        p.write_bytes(b"\xef\xbb\xbf" + content.encode("utf-8"))
+        series = self.parser.parse_ics_file(str(p))
+        assert series is not None and len(series) == 1
+        assert series[0].summary == "高数"
+
+    def test_no_bom_still_parsed(self, tmp_path):
+        # 无 BOM 的常规文件不受影响
+        series = self.parser.parse_ics_file(write_ics(tmp_path, vevent(summary="英语")))
+        assert series is not None and series[0].summary == "英语"
+
+    def test_gbk_ics_parsed(self, tmp_path):
+        # Windows 记事本 ANSI(GBK/GB18030)保存的课表 → 统一转 UTF-8 后解析
+        content = "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//t//CN\n" + vevent(summary="高等数学") + "END:VCALENDAR\n"
+        p = tmp_path / "gbk.ics"
+        p.write_bytes(content.encode("gb18030"))
+        series = self.parser.parse_ics_file(str(p))
+        assert series is not None and len(series) == 1
+        assert series[0].summary == "高等数学"
+
+    def test_utf16_ics_parsed(self, tmp_path):
+        content = "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//t//CN\n" + vevent(summary="大学英语") + "END:VCALENDAR\n"
+        p = tmp_path / "u16.ics"
+        p.write_bytes(content.encode("utf-16"))  # 自带 BOM
+        series = self.parser.parse_ics_file(str(p))
+        assert series is not None and len(series) == 1
+        assert series[0].summary == "大学英语"
+
+    def test_unsupported_encoding_returns_none(self, tmp_path):
+        p = tmp_path / "garbage.ics"
+        p.write_bytes(b"\xff\xff\xff\xff")  # UTF-8/GB18030 均无法解码
+        assert self.parser.parse_ics_file(str(p)) is None
+
+    def test_decode_bytes_to_text_units(self):
+        from astrbot_plugin_course.course_types import decode_bytes_to_text
+
+        assert decode_bytes_to_text("你好".encode("utf-8")) == "你好"
+        assert decode_bytes_to_text(b"\xef\xbb\xbf" + "你好".encode("utf-8")) == "你好"
+        assert decode_bytes_to_text("你好".encode("utf-16")) == "你好"
+        assert decode_bytes_to_text("你好".encode("gb18030")) == "你好"
+        assert decode_bytes_to_text(b"\xff\xff\xff") is None  # 所有候选均失败
+
     def test_empty_calendar_returns_empty_list(self, tmp_path):
         p = write_ics(tmp_path, "")
         result = self.parser.parse_ics_file(p)

@@ -38,6 +38,47 @@ class TestBindings:
         storage._bindings_file.write_text(json.dumps(payload), encoding="utf-8")
         assert storage.load_bindings()["u"].enable_reminder is False
 
+    def test_bindings_json_with_utf8_bom(self, storage):
+        # Windows 记事本等工具保存的 UTF-8 with BOM 文件须能正常读取
+        payload = {
+            "version": 1,
+            "bindings": {
+                "u": {
+                    "user_id": "u", "unified_msg_origin": "t", "nickname": "昵称",
+                    "ics_file": "a", "updated_at_ts": 0.0,
+                    "enable_reminder": True,
+                }
+            },
+        }
+        raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        storage._bindings_file.write_bytes(b"\xef\xbb\xbf" + raw)
+        loaded = storage.load_bindings()
+        assert loaded["u"].nickname == "昵称"
+        assert loaded["u"].enable_reminder is True
+
+    def test_bindings_json_with_gbk(self, storage):
+        # ANSI(GBK/GB18030)保存的文件 → 自动转 UTF-8 后读取
+        payload = {
+            "version": 1,
+            "bindings": {
+                "u": {
+                    "user_id": "u", "unified_msg_origin": "t", "nickname": "昵称",
+                    "ics_file": "a", "updated_at_ts": 0.0,
+                }
+            },
+        }
+        storage._bindings_file.write_bytes(
+            json.dumps(payload, ensure_ascii=False).encode("gb18030")
+        )
+        assert storage.load_bindings()["u"].nickname == "昵称"
+
+    def test_reminded_json_with_utf8_bom(self, storage):
+        payload = json.dumps(
+            {"version": 1, "reminded": {"u": ["k1"]}}, ensure_ascii=False
+        ).encode("utf-8")
+        storage._reminded_file.write_bytes(b"\xef\xbb\xbf" + payload)
+        assert storage.load_reminded() == {"u": {"k1"}}
+
     def test_second_save_creates_bak_with_previous_version(self, storage):
         storage.save_bindings({"u1": make_binding("u1", 15)})
         storage.save_bindings({"u1": make_binding("u1", 30), "u2": make_binding("u2")})

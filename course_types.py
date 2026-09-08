@@ -18,6 +18,26 @@ def resolve_timezone(name: str):
         return SHANGHAI_TZ
 
 
+def decode_bytes_to_text(raw: bytes) -> Optional[str]:
+    """把文件字节流解码为文本:识别 UTF-8(±BOM)/UTF-16/GBK(GB18030)。
+
+    相当于把"编码不正确"的输入统一转换为 UTF-8 文本供后续处理
+    (Python str 即统一编码);全部候选编码均解码失败时返回 None。
+    """
+    if raw.startswith(b"\xef\xbb\xbf"):  # UTF-8 BOM
+        candidates = ("utf-8-sig", "gb18030")
+    elif raw.startswith((b"\xff\xfe", b"\xfe\xff")):  # UTF-16 LE/BE BOM
+        candidates = ("utf-16",)
+    else:
+        candidates = ("utf-8", "gb18030")
+    for enc in candidates:
+        try:
+            return raw.decode(enc)
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    return None
+
+
 @dataclass(frozen=True)
 class CourseSeries:
     """一条课程规则(对应 ics 里的单个 VEVENT)。
