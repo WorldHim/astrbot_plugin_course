@@ -5,6 +5,12 @@
     "type": "int",
     "default": 60
   },
+  "reminder_send_timeout_seconds": {
+    "description": "单用户提醒发送的超时(秒)",
+    "hint": "防止慢平台拖累其他用户的提醒;建议 15-60",
+    "type": "int",
+    "default": 30
+  },
   "default_reminder_minutes": {
     "description": "新绑定用户的默认开课提醒提前量(分钟)",
     "type": "int",

@@ -731,41 +731,82 @@ class CoursePlugin(Star):
         if self._cleanup_reminded(now_utc, retention_days):
             # 过期清理改变了记录,同步落盘
             self._storage.save_reminded(self._reminded)
-        for user_id, binding in bindings.items():
-            try:
-                user_tz = binding.get_timezone()
-                now = now_utc.astimezone(user_tz)
-                series = self._load_series(binding)
-                if series is None:
-                    # 课表文件缺失或解析失败:本轮跳过该用户的提醒(错误已由解析器记录)
-                    continue
-                hits = upcoming_within_15m(
-                    now=now,
-                    user_id=user_id,
-                    events=series,
-                    advance_minutes=binding.reminder_advance_minutes,
-                    tz=user_tz,
-                )
-                if not hits:
-                    continue
 
-                reminded = self._reminded.setdefault(user_id, set())
-                new_keys: Set[str] = set()
-                for hit in hits:
-                    key = hit.event.reminder_key()
-                    if key in reminded:
-                        continue
-                    reminded.add(key)
-                    new_keys.add(key)
-                    msg = _reminder_text(hit.event, binding.reminder_advance_minutes)
-                    chain = MessageChain().message(msg)
-                    session = MessageSession.from_str(binding.unified_msg_origin)
-                    await self._context.send_message(session, chain)
-                if new_keys:
-                    # 新增了提醒记录,持久化避免重启/重载后重复提醒
-                    self._storage.save_reminded(self._reminded)
-            except Exception as e:
-                logger.error(f"[course] reminder failed for user {user_id}: {e}")
+        # 并发处理所有用户:单个用户发送缓慢/失败不影响其他用户
+        send_timeout = self._cfg_int("reminder_send_timeout_seconds", 30, 5)
+        results = await asyncio.gather(
+            *(
+                self._remind_user_with_timeout(user_id, binding, now_utc, send_timeout)
+                for user_id, binding in bindings.items()
+            ),
+            return_exceptions=True,
+        )
+        # 任一用户有新增提醒记录(或超时导致状态不确定)时统一落盘一次
+        need_save = False
+        for result in results:
+            if isinstance(result, BaseException):
+                logger.error(f"[course] reminder task crashed: {result!r}")
+                need_save = True
+            elif result is True:
+                need_save = True
+        if need_save:
+            self._storage.save_reminded(self._reminded)
+
+    async def _remind_user_with_timeout(
+        self, user_id: str, binding: UserBinding, now_utc: datetime, timeout: int
+    ) -> bool:
+        """带超时的单用户提醒;超时时记录已视为发送(防打扰优先),返回是否需落盘。"""
+        try:
+            return await asyncio.wait_for(
+                self._remind_user(user_id, binding, now_utc), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"[course] reminder for user {user_id} timed out after {timeout}s"
+            )
+            # 超时时提醒 key 可能已加入内存记录,同步落盘(防重启后重复提醒)
+            return True
+        except Exception as e:
+            logger.error(f"[course] reminder task failed for user {user_id}: {e}")
+            return False
+
+    async def _remind_user(
+        self, user_id: str, binding: UserBinding, now_utc: datetime
+    ) -> bool:
+        """处理单个用户的开课提醒;返回是否有新增提醒记录(需落盘)。"""
+        try:
+            user_tz = binding.get_timezone()
+            now = now_utc.astimezone(user_tz)
+            series = self._load_series(binding)
+            if series is None:
+                # 课表文件缺失或解析失败:跳过该用户的提醒(错误已由解析器记录)
+                return False
+            hits = upcoming_within_15m(
+                now=now,
+                user_id=user_id,
+                events=series,
+                advance_minutes=binding.reminder_advance_minutes,
+                tz=user_tz,
+            )
+            if not hits:
+                return False
+
+            reminded = self._reminded.setdefault(user_id, set())
+            new_keys: Set[str] = set()
+            for hit in hits:
+                key = hit.event.reminder_key()
+                if key in reminded:
+                    continue
+                reminded.add(key)
+                new_keys.add(key)
+                msg = _reminder_text(hit.event, binding.reminder_advance_minutes)
+                chain = MessageChain().message(msg)
+                session = MessageSession.from_str(binding.unified_msg_origin)
+                await self._context.send_message(session, chain)
+            return bool(new_keys)
+        except Exception as e:
+            logger.error(f"[course] reminder failed for user {user_id}: {e}")
+            return False
 
     async def _collect_user_daily_job_ids(
         self, user_id: str, binding=None
