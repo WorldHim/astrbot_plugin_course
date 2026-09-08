@@ -30,6 +30,10 @@ class CourseStorage:
             safe_name = "user"
         return self._ics_dir / f"{safe_name}.ics"
 
+    def resolve_ics_path(self, binding: UserBinding) -> Path:
+        """由绑定记录解析其课表文件的绝对路径。"""
+        return (self._base_dir / binding.ics_file).resolve()
+
     def _read_bindings_json(self, path: Path) -> Dict[str, UserBinding]:
         """解析绑定文件;缺失/损坏时抛异常(由调用方决定是否回退备份)。"""
         raw = json.loads(path.read_text(encoding="utf-8"))

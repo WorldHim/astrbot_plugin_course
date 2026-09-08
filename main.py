@@ -236,7 +236,7 @@ class CoursePlugin(Star):
         if ok:
             # 顺带清除该课表的解析缓存，避免已删除文件的缓存条目常驻内存
             if binding:
-                ics_path = (self._storage._base_dir / binding.ics_file).resolve()
+                ics_path = self._storage.resolve_ics_path(binding)
                 self._parser.clear_cache(str(ics_path))
             self._reminded.pop(user_id, None)
             self._storage.save_reminded(self._reminded)
@@ -527,7 +527,7 @@ class CoursePlugin(Star):
         返回 None 表示课表文件缺失或解析失败(区别于“没有课程”的空列表),
         调用方应向用户提示重新绑定。
         """
-        ics_path = (self._storage._base_dir / binding.ics_file).resolve()
+        ics_path = self._storage.resolve_ics_path(binding)
         series = self._parser.parse_ics_file(
             str(ics_path), default_tz=binding.get_timezone()
         )
