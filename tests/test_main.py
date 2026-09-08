@@ -8,6 +8,7 @@ from astrbot_plugin_course.course_types import CourseEvent
 from astrbot_plugin_course.main import (
     _day_text_fallback,
     _event_view,
+    _help_text,
     _resolve_timezone,
     _week_text_fallback,
 )
@@ -202,5 +203,32 @@ class TestRenderCache:
             asyncio.run(plugin._render_schedule(tmpl, dict(data)))
             asyncio.run(plugin._render_schedule(tmpl, dict(data)))  # 重复查询 → 命中缓存
         assert len(calls) == 4  # 每个视图只渲染一次
-        assert len(plugin._render_cache) == 4  # 四个视图各自独立缓存条目
+        assert len(plugin._render_cache) == 4  # 四个视图各自独立缓存
+
+
+class TestHelpText:
+    """帮助指令文本完整性:全部指令均被列出。"""
+
+    def test_contains_all_commands(self):
+        text = _help_text()
+        for cmd in [
+            "绑定课表",
+            "删除课表",
+            "今日课表",
+            "明日课表",
+            "本周课表",
+            "下周课表",
+            "设置每日推送",
+            "设置提醒时间",
+            "设置时区",
+            "查看设置",
+            "课表帮助",
+        ]:
+            assert f"/{cmd}" in text, f"帮助文本缺少指令 /{cmd}"
+
+    def test_grouped_with_tip(self):
+        text = _help_text()
+        for section in ["【课表管理】", "【课表查询】", "【配置管理】"]:
+            assert section in text
+        assert "课表转日历" in text  # 课表文件导出工具(WikiLake)提示
 

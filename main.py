@@ -287,7 +287,8 @@ class CoursePlugin(Star):
 
             parts = text.split()
             if len(parts) == 2 and parts[0] == "开启":
-                time_str = parts[1]
+                # 兼容帮助文案中的全角冒号(如“07：00”),统一归一化为半角再校验/存储
+                time_str = parts[1].replace("：", ":")
                 if not _is_valid_time_format(time_str):
                     controller.keep(timeout=wait_seconds, reset_timeout=True)
                     return
@@ -416,6 +417,11 @@ class CoursePlugin(Star):
             bindings[user_id].timezone_name = arg
             self._storage.save_bindings(bindings)
         yield event.plain_result(f"时区已设置为：{arg}")
+
+    @filter.command("课表帮助")
+    async def help_cmd(self, event: AstrMessageEvent):
+        """输出本插件的全部指令说明。"""
+        yield event.plain_result(_help_text())
 
     @filter.command("今日课表")
     async def today(self, event: AstrMessageEvent):
@@ -937,6 +943,34 @@ def _resolve_timezone(name: str):
         return ZoneInfo(name)
     except Exception:
         return None
+
+
+def _help_text() -> str:
+    """插件指令帮助文本(供 /课表帮助 输出)。"""
+    return "\n".join(
+        [
+            "📚 早安课表 · 指令列表",
+            "",
+            "【课表管理】",
+            "/绑定课表：绑定个人课表（在 120 秒内发送 .ics 文件）",
+            "/删除课表：删除已绑定的课表",
+            "",
+            "【课表查询】",
+            "/今日课表：查看今日课程",
+            "/明日课表：查看明日课程",
+            "/本周课表：查看本周课程",
+            "/下周课表：查看下周课程",
+            "",
+            "【配置管理】",
+            "/设置每日推送：每日定时推送课表（回复“开启 HH:MM”或“关闭”）",
+            "/设置提醒时间：开课前提醒的提前分钟数（1～120）",
+            "/设置时区：设置课表时区（IANA 名称，默认东八区）",
+            "/查看设置：查看当前配置",
+            "",
+            "💡 课表 .ics 文件用「课表转日历」导出：https://wikilake.netlify.app/tools/%E8%AF%BE%E8%A1%A8%E8%BD%AC%E6%97%A5%E5%8E%86 ，再用 /绑定课表 上传。",
+            "📖 随时发送 /课表帮助 查看本列表。",
+        ]
+    )
 
 
 def _event_view(e: CourseEvent) -> Dict[str, str]:
