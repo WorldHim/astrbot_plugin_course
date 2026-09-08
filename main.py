@@ -960,7 +960,7 @@ class CoursePlugin(Star):
         return changed
 
 
-def _courses_lines(courses) -> List[str]:
+def _courses_lines(courses) -> list[str]:
     """把课程 dict 列表格式化为文字行(渲染失败时的兜底展示)。"""
     lines = []
     for c in courses:
