@@ -4,7 +4,7 @@ import json
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Set
 
 from astrbot.api import logger
 from astrbot.api.star import StarTools
@@ -18,6 +18,7 @@ class CourseStorage:
         self._base_dir = StarTools.get_data_dir(plugin_name)
         self._ics_dir = self._base_dir / "ics"
         self._bindings_file = self._base_dir / "bindings.json"
+        self._reminded_file = self._base_dir / "reminded.json"
 
         self._base_dir.mkdir(parents=True, exist_ok=True)
         self._ics_dir.mkdir(parents=True, exist_ok=True)
@@ -55,6 +56,42 @@ class CourseStorage:
         except Exception as e:
             logger.error(f"[course] Failed to load bindings.json: {e}")
             return {}
+
+    def load_reminded(self) -> Dict[str, Set[str]]:
+        """加载已提醒记录(开课提醒去重);文件缺失或损坏时返回空记录。"""
+        if not self._reminded_file.exists():
+            return {}
+        try:
+            raw = json.loads(self._reminded_file.read_text(encoding="utf-8"))
+            reminded: Dict[str, Set[str]] = {}
+            for uid, keys in raw.get("reminded", {}).items():
+                if not isinstance(keys, list):
+                    continue
+                reminded[str(uid)] = {str(k) for k in keys}
+            return reminded
+        except Exception as e:
+            logger.error(f"[course] Failed to load reminded.json: {e}")
+            return {}
+
+    def save_reminded(self, reminded: Dict[str, Set[str]]) -> None:
+        """持久化已提醒记录(临时文件 + replace 原子写,避免写坏)。"""
+        payload = {
+            "version": 1,
+            "updated_at_ts": time.time(),
+            "reminded": {uid: sorted(keys) for uid, keys in reminded.items()},
+        }
+        tmp_path = self._reminded_file.with_suffix(".json.tmp")
+        try:
+            tmp_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            tmp_path.replace(self._reminded_file)
+        except Exception as e:
+            logger.error(f"[course] Failed to save reminded.json: {e}")
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     def save_bindings(self, bindings: Dict[str, UserBinding]) -> None:
         payload = {

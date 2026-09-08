@@ -66,10 +66,10 @@ class CoursePlugin(Star):
                         logger.warning(f"[course] unexpected error waiting for old task: {e}")
                 self._reminder_task = None
             
-            # 重置所有状态
-            self._reminded.clear()  # 清空提醒记录
+            # 恢复提醒记录(持久化),避免重启/重载后重复提醒
+            self._reminded = self._storage.load_reminded()
             self._stop_event.clear()  # 清除停止信号
-            logger.info("[course] reminder state reset")
+            logger.info("[course] reminder state restored")
             
             # 创建新任务
             self._reminder_task = asyncio.create_task(self._reminder_loop())
@@ -213,6 +213,7 @@ class CoursePlugin(Star):
                 ics_path = (self._storage._base_dir / binding.ics_file).resolve()
                 self._parser.clear_cache(str(ics_path))
             self._reminded.pop(user_id, None)
+            self._storage.save_reminded(self._reminded)
             yield event.plain_result("已删除课表。")
         else:
             yield event.plain_result("你还没有绑定课表。")
@@ -664,7 +665,9 @@ class CoursePlugin(Star):
             return
 
         now_utc = datetime.now(timezone.utc)
-        self._cleanup_reminded(now_utc)
+        if self._cleanup_reminded(now_utc):
+            # 过期清理改变了记录,同步落盘
+            self._storage.save_reminded(self._reminded)
         for user_id, binding in bindings.items():
             try:
                 user_tz = binding.get_timezone()
@@ -684,15 +687,20 @@ class CoursePlugin(Star):
                     continue
 
                 reminded = self._reminded.setdefault(user_id, set())
+                new_keys: Set[str] = set()
                 for hit in hits:
                     key = hit.event.reminder_key()
                     if key in reminded:
                         continue
                     reminded.add(key)
+                    new_keys.add(key)
                     msg = _reminder_text(hit.event, binding.reminder_advance_minutes)
                     chain = MessageChain().message(msg)
                     session = MessageSession.from_str(binding.unified_msg_origin)
                     await self._context.send_message(session, chain)
+                if new_keys:
+                    # 新增了提醒记录,持久化避免重启/重载后重复提醒
+                    self._storage.save_reminded(self._reminded)
             except Exception as e:
                 logger.error(f"[course] reminder failed for user {user_id}: {e}")
 
@@ -729,7 +737,9 @@ class CoursePlugin(Star):
                 job_ids.add(str(job_id))
         return job_ids
 
-    def _cleanup_reminded(self, now: datetime) -> None:
+    def _cleanup_reminded(self, now: datetime) -> bool:
+        """清理 30 天前的提醒记录;返回是否有变化(需同步落盘)。"""
+        changed = False
         cutoff = now - timedelta(days=30)
         for user_id in list(self._reminded.keys()):
             kept: Set[str] = set()
@@ -737,10 +747,13 @@ class CoursePlugin(Star):
                 start_time = _reminder_start_from_key(key)
                 if start_time and start_time >= cutoff:
                     kept.add(key)
+                else:
+                    changed = True
             if kept:
                 self._reminded[user_id] = kept
             else:
                 self._reminded.pop(user_id, None)
+        return changed
 
 
 def _resolve_timezone(name: str):
