@@ -3,7 +3,8 @@ data/
 # VSCode
 .vscode/
 
-# Byte-compiled / optimized / DLL files
+# Python
+.venv/
 .pytest_cache/
 __pycache__/
 *.py[cod]
