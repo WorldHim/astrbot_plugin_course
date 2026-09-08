@@ -20,6 +20,8 @@ class CourseStorage:
         self._ics_dir = self._base_dir / "ics"
         self._bindings_file = self._base_dir / "bindings.json"
         self._reminded_file = self._base_dir / "reminded.json"
+        # (主文件 mtime, 绑定数据)——文件未变化时 load 直接返回缓存,省去磁盘 IO
+        self._bindings_cache: Optional[tuple[float, Dict[str, UserBinding]]] = None
 
         self._base_dir.mkdir(parents=True, exist_ok=True)
         self._ics_dir.mkdir(parents=True, exist_ok=True)
@@ -62,13 +64,35 @@ class CourseStorage:
         return bindings
 
     def load_bindings(self) -> Dict[str, UserBinding]:
-        """加载绑定;主文件损坏时自动从 .bak 备份恢复并告警。"""
+        """加载绑定;带 mtime 内存缓存(文件未变化时直接返回缓存对象,勿直接修改)。"""
+        try:
+            mtime: Optional[float] = self._bindings_file.stat().st_mtime
+        except OSError:
+            mtime = None
+
+        cached = self._bindings_cache
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
+
+        mtime, bindings = self._read_bindings_with_recovery()
+        self._bindings_cache = (mtime, bindings)
+        return bindings
+
+    def _read_bindings_with_recovery(
+        self,
+    ) -> tuple[Optional[float], Dict[str, UserBinding]]:
+        """从磁盘读取绑定;主文件损坏时自动从 .bak 备份恢复并告警。"""
         main_path = self._bindings_file
         bak_path = self._bindings_file.with_suffix(".json.bak")
 
+        try:
+            mtime = main_path.stat().st_mtime
+        except OSError:
+            mtime = None
+
         if main_path.exists():
             try:
-                return self._read_bindings_json(main_path)
+                return mtime, self._read_bindings_json(main_path)
             except Exception as e:
                 logger.error(
                     f"[course] bindings.json is corrupted, trying backup: {e}"
@@ -78,13 +102,13 @@ class CourseStorage:
 
         if not bak_path.exists():
             logger.warning("[course] no bindings backup available")
-            return {}
+            return mtime, {}
 
         try:
             restored = self._read_bindings_json(bak_path)
         except Exception as e:
             logger.error(f"[course] bindings backup is also corrupted: {e}")
-            return {}
+            return mtime, {}
 
         logger.warning(
             f"[course] restored {len(restored)} bindings from backup "
@@ -93,9 +117,10 @@ class CourseStorage:
         try:
             # 用备份恢复主文件,避免下次仍读到坏文件
             shutil.copyfile(bak_path, main_path)
+            mtime = main_path.stat().st_mtime
         except Exception as e:
             logger.warning(f"[course] failed to copy backup to main file: {e}")
-        return restored
+        return mtime, restored
 
     def load_reminded(self) -> Dict[str, Set[str]]:
         """加载已提醒记录(开课提醒去重);文件缺失或损坏时返回空记录。"""
@@ -150,8 +175,18 @@ class CourseStorage:
                 shutil.copyfile(self._bindings_file, bak_path)
             # 临时文件 + replace 原子写,避免写一半崩溃导致文件损坏
             tmp_path.replace(self._bindings_file)
+            # 保存成功,同步刷新内存缓存(省一次回读)
+            try:
+                self._bindings_cache = (
+                    self._bindings_file.stat().st_mtime,
+                    dict(bindings),
+                )
+            except OSError:
+                self._bindings_cache = None
         except Exception as e:
             logger.error(f"[course] Failed to save bindings.json: {e}")
+            # 保存失败时缓存状态不确定,置空强制下次重读
+            self._bindings_cache = None
             try:
                 tmp_path.unlink(missing_ok=True)
             except Exception:

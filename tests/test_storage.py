@@ -24,9 +24,13 @@ class TestBindings:
         assert data["bindings"]["u1"]["reminder_advance_minutes"] == 15
 
     def test_corrupted_main_restored_from_bak(self, storage):
+        import os
+        import time
+
         storage.save_bindings({"u1": make_binding("u1")})
         storage.save_bindings({"u1": make_binding("u1", 30), "u2": make_binding("u2")})
         storage._bindings_file.write_text("corrupted", encoding="utf-8")
+        os.utime(storage._bindings_file, (time.time() + 10, time.time() + 10))
 
         restored = storage.load_bindings()
 
@@ -118,6 +122,64 @@ class TestBindings:
     def test_resolve_ics_path(self, storage):
         b = storage.upsert_binding(user_id="u", unified_msg_origin="t", nickname="n")
         assert storage.resolve_ics_path(b) == (storage._base_dir / "ics" / "u.ics").resolve()
+
+
+class TestBindingsCache:
+    """C15:load_bindings 的 mtime 内存缓存。"""
+
+    def test_cache_hit_returns_same_object(self, storage):
+        storage.save_bindings({"u1": make_binding("u1")})
+        first = storage.load_bindings()
+        second = storage.load_bindings()
+        assert first is second  # mtime 未变 → 直接命中缓存对象
+
+    def test_save_refreshes_cache(self, storage):
+        storage.save_bindings({"u1": make_binding("u1", 15)})
+        assert storage.load_bindings()["u1"].reminder_advance_minutes == 15
+        storage.save_bindings({"u1": make_binding("u1", 45)})
+        # 若缓存未刷新,这里会读到旧值 15
+        assert storage.load_bindings()["u1"].reminder_advance_minutes == 45
+
+    def test_external_change_invalidates_cache(self, storage):
+        import os
+        import time
+
+        storage.save_bindings({"u1": make_binding("u1", 15)})
+        # 外部直接改文件,并强制 mtime 前移(模拟真实的后续修改)
+        payload = json.loads(storage._bindings_file.read_text(encoding="utf-8"))
+        payload["bindings"]["u1"]["reminder_advance_minutes"] = 99
+        storage._bindings_file.write_text(json.dumps(payload), encoding="utf-8")
+        os.utime(storage._bindings_file, (time.time() + 10, time.time() + 10))
+        assert storage.load_bindings()["u1"].reminder_advance_minutes == 99
+
+    def test_missing_file_cache_not_sticky(self, storage):
+        storage.save_bindings({"u1": make_binding("u1")})
+        storage.save_bindings({"u1": make_binding("u1", 30)})  # 产生 .bak(上一版)
+        storage._bindings_file.unlink()  # 主文件没了 → 从 .bak 恢复
+        restored = storage.load_bindings()
+        assert set(restored) == {"u1"}
+        # 恢复结果进入缓存,再次 load 命中同一对象
+        assert storage.load_bindings() is restored
+
+    def test_failed_save_clears_cache(self, storage):
+        storage.save_bindings({"u1": make_binding("u1")})
+        storage.load_bindings()
+        # 模拟保存失败:patch replace 抛异常
+        import pathlib
+
+        original_replace = pathlib.Path.replace
+
+        def broken_replace(self, target):
+            raise OSError("disk full")
+
+        pathlib.Path.replace = broken_replace
+        try:
+            storage.save_bindings({"u1": make_binding("u1", 99)})
+        finally:
+            pathlib.Path.replace = original_replace
+        # 保存失败 → 缓存被清空,下次 load 走磁盘(仍返回磁盘上的旧数据)
+        loaded = storage.load_bindings()
+        assert loaded["u1"].reminder_advance_minutes == 15
 
 
 class TestReminded:
