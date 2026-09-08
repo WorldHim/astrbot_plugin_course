@@ -5,7 +5,7 @@ import hashlib
 import json
 import shutil
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Optional, Sequence, Set
 
@@ -24,8 +24,9 @@ from astrbot.core.utils.session_waiter import (
 from .course_types import CourseEvent, CourseSeries, SHANGHAI_TZ, UserBinding
 from .help_content import TOOL_LINK, help_render_data, help_text
 from .ics_parser import IcsParser
-from .render_templates import DAY_TMPL, GROUP_TMPL, HELP_TMPL, WEEK_TMPL
+from .render_templates import DAY_TMPL, GROUP_TMPL, HELP_TMPL, RANK_TMPL, WEEK_TMPL
 from .schedule_engine import (
+    class_time_in_window,
     current_or_next_event,
     day_events,
     upcoming_within_15m,
@@ -49,6 +50,9 @@ class _SenderSessionFilter(SessionFilter):
 
 # 插件版本(@register 与帮助图片共用;metadata.yaml 的 version 需保持一致)
 PLUGIN_VERSION = "2.5.1"
+
+# 星期几的中文标签(周课表与上课时长榜共用)
+_WEEKDAY_NAMES = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
 
 @register(
@@ -511,13 +515,12 @@ class CoursePlugin(Star):
         start = week_start(today_date)
         week_lists = week_events(series, start, user_tz)
         days = []
-        labels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
         for i in range(7):
             d = start + timedelta(days=i)
             day_list = week_lists[i]
             days.append(
                 {
-                    "label": labels[i],
+                    "label": _WEEKDAY_NAMES[i],
                     "date": d.strftime("%m-%d"),
                     "is_today": d == today_date,
                     "courses": [_event_view(e) for e in day_list],
@@ -641,6 +644,110 @@ class CoursePlugin(Star):
             "page_width": 480,
         }
 
+    @filter.command("上课时长榜")
+    async def study_rank(self, event: AstrMessageEvent):
+        """看看本群谁今天上课最拼(图片)。"""
+        async for r in self._send_study_rank(event, mode="日"):
+            yield r
+
+    @filter.command("上课时长周榜")
+    async def study_week_rank(self, event: AstrMessageEvent):
+        """看看本群谁这周上课最拼(图片)。"""
+        async for r in self._send_study_rank(event, mode="周"):
+            yield r
+
+    async def _send_study_rank(self, event: AstrMessageEvent, mode: str):
+        now_utc = datetime.now(timezone.utc)
+        bindings = self._storage.load_bindings()
+        members = [
+            b
+            for b in bindings.values()
+            if b.unified_msg_origin == event.unified_msg_origin
+        ]
+        if not members:
+            yield event.plain_result(
+                "本群还没有人绑定课表。发送 /绑定课表 绑定后即可使用本指令。"
+            )
+            return
+
+        data = self._collect_study_rank(members, now_utc, mode)
+        url = await self._render_schedule(
+            RANK_TMPL,
+            data,
+            options={"quality": self._cfg_int("render_quality", 100, 1)},
+        )
+        if url is None:
+            yield event.plain_result(_study_rank_text(data))
+            return
+        yield event.image_result(url)
+
+    def _collect_study_rank(
+        self, members: Sequence[UserBinding], now_utc: datetime, mode: str
+    ) -> dict:
+        """统计本群成员的日/周上课总时长并排名(渲染与文字兜底共用)。
+
+        mode: "日" 统计各自时区的今天,"周" 统计各自时区的本周(周一~周日)。
+        每位成员按自己的时区取窗口(与个人课表查询口径一致);顶部展示的
+        日期范围以东八区为准。0 时长的成员不上榜;并列时按昵称排序。
+        """
+        now_sh = now_utc.astimezone(SHANGHAI_TZ)
+        if mode == "周":
+            title = "本周上课时长榜"
+            monday = week_start(now_sh.date())
+            range_label = f"{monday:%m-%d} ~ {(monday + timedelta(days=6)):%m-%d}"
+        else:
+            title = "今日上课时长榜"
+            range_label = f"{now_sh:%m-%d} {_WEEKDAY_NAMES[now_sh.weekday()]}"
+
+        rows: list[dict] = []
+        for binding in members:
+            series = self._load_series(binding)
+            if series is None:
+                continue
+            user_tz = binding.get_timezone()
+            now_local = now_utc.astimezone(user_tz)
+            if mode == "周":
+                win_start = datetime.combine(
+                    week_start(now_local.date()), dt_time.min, tzinfo=user_tz
+                )
+                win_end = win_start + timedelta(days=7)
+            else:
+                win_start = datetime.combine(
+                    now_local.date(), dt_time.min, tzinfo=user_tz
+                )
+                win_end = win_start + timedelta(days=1)
+            seconds, count = class_time_in_window(
+                series, win_start, win_end, user_tz
+            )
+            if seconds <= 0:
+                continue
+            rows.append(
+                {
+                    "nickname": binding.nickname or binding.user_id,
+                    "avatar": (
+                        f"https://q1.qlogo.cn/g?b=qq&nk={binding.user_id}&s=100"
+                    ),
+                    "seconds": seconds,
+                    "count": count,
+                }
+            )
+
+        rows.sort(key=lambda r: (-r["seconds"], r["nickname"]))
+        return {
+            "title": title,
+            "range": range_label,
+            "rows": [
+                {
+                    "rank": i + 1,
+                    "nickname": r["nickname"],
+                    "avatar": r["avatar"],
+                    "total": _format_in_minutes(r["seconds"] // 60),
+                    "count": r["count"],
+                }
+                for i, r in enumerate(rows)
+            ],
+            "page_width": 480,
+        }
 
     @filter.command("下周课表")
     async def next_week(self, event: AstrMessageEvent):
@@ -1129,6 +1236,22 @@ def _group_now_text(data: dict) -> str:
         lines.append(who)
     if not data["groups"]:
         lines.append("此刻本群没有成员正在上课。")
+    return "\n".join(lines)
+
+
+def _study_rank_text(data: dict) -> str:
+    """/上课时长榜 的文字版兜底(图片渲染失败时发送)。"""
+    lines = [f"🏆 {data['title']}({data['range']})"]
+    medals = ("🥇", "🥈", "🥉")
+    for r in data["rows"]:
+        medal = (
+            medals[r["rank"] - 1]
+            if r["rank"] <= len(medals)
+            else f"{r['rank']}."
+        )
+        lines.append(f"{medal} {r['nickname']}:{r['total']}(共 {r['count']} 节)")
+    if len(lines) == 1:
+        lines.append("本榜周期内暂无上课记录。")
     return "\n".join(lines)
 
 

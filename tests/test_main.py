@@ -1,6 +1,6 @@
 """main.py 轻量单元测试:配置读取、视图/兜底文案、时区解析、渲染缓存。"""
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time as dt_time, timedelta, timezone
 
 import pytest
 
@@ -13,6 +13,7 @@ from astrbot_plugin_course.main import (
     _event_view,
     _group_now_text,
     _resolve_timezone,
+    _study_rank_text,
     _week_text_fallback,
 )
 from conftest import FakeEvent, make_binding
@@ -236,6 +237,8 @@ class TestHelpText:
             "本周课表",
             "下周课表",
             "当前课程",
+            "上课时长榜",
+            "上课时长周榜",
             "设置每日推送",
             "设置提醒时间",
             "设置时区",
@@ -256,7 +259,7 @@ class TestHelpCommand:
     def test_render_data_structure(self):
         data = help_render_data(PLUGIN_VERSION)
         cmds = [c["cmd"] for s in data["sections"] for c in s["commands"]]
-        assert len(cmds) == 11
+        assert len(cmds) == 13
         assert all(c.startswith("/") for c in cmds)
         assert data["version"] == PLUGIN_VERSION  # 版本号进缓存键:同版本同图
         assert data["title"]
@@ -556,4 +559,219 @@ class TestGroupSchedule:
         )
         assert "本群还没有人绑定课表" in results[0]
         assert "Alice" not in results[0]
+
+
+class TestStudyRank:
+    """/上课时长榜:本群成员日/周上课时长排行(图片)。"""
+
+    @staticmethod
+    def _binding(uid, nickname, umo="group:1"):
+        b = make_binding(uid)
+        b.nickname = nickname
+        b.unified_msg_origin = umo
+        return b
+
+    @staticmethod
+    def _run(plugin, evt, command="study_rank"):
+        async def run():
+            return [r async for r in getattr(plugin, command)(evt)]
+
+        return asyncio.run(run())
+
+    @staticmethod
+    def _daily_courses(when: datetime, duration_minutes=95):
+        return [
+            CourseSeries(
+                summary="高等数学",
+                dtstart=when,
+                duration=timedelta(minutes=duration_minutes),
+                location="明理楼302",
+            )
+        ]
+
+    def test_no_members_hints_bind(self, plugin):
+        results = self._run(plugin, FakeEvent("x", unified_msg_origin="group:1"))
+        assert len(results) == 1
+        assert "本群还没有人绑定课表" in results[0]
+
+    def test_daily_rank_sorted_with_avatar(self, plugin):
+        """日榜:按总时长降序,含头像、节数与时长。"""
+        from datetime import time as dt_time
+
+        today = datetime.now(SHANGHAI_TZ).date()
+        busy = self._daily_courses(
+            datetime.combine(today, dt_time(9, 0), tzinfo=SHANGHAI_TZ)
+        )
+        second = self._daily_courses(
+            datetime.combine(today, dt_time(14, 0), tzinfo=SHANGHAI_TZ)
+        )
+        plugin._storage.save_bindings(
+            {
+                "u1": self._binding("u1", "Alice"),
+                "u2": self._binding("u2", "Bob"),
+            }
+        )
+        # Alice 今天两节,Bob 只有一节
+        plugin._load_series = lambda b: (busy + second) if b.user_id == "u1" else busy
+
+        data = plugin._collect_study_rank(
+            list(plugin._storage.load_bindings().values()),
+            datetime.now(timezone.utc),
+            "日",
+        )
+        assert data["title"] == "今日上课时长榜"
+        assert [r["nickname"] for r in data["rows"]] == ["Alice", "Bob"]
+        assert [r["rank"] for r in data["rows"]] == [1, 2]
+        assert data["rows"][0]["count"] == 2
+        assert data["rows"][1]["count"] == 1
+        assert data["rows"][0]["avatar"] == "https://q1.qlogo.cn/g?b=qq&nk=u1&s=100"
+        assert "小时" in data["rows"][0]["total"]
+
+    def test_zero_duration_member_excluded(self, plugin):
+        """今天没课的成员不上榜(课在明天),有课成员正常上榜。"""
+        from datetime import time as dt_time
+
+        tomorrow = datetime.now(SHANGHAI_TZ).date() + timedelta(days=1)
+        today = datetime.now(SHANGHAI_TZ).date()
+        tomorrow_course = self._daily_courses(
+            datetime.combine(tomorrow, dt_time(9, 0), tzinfo=SHANGHAI_TZ)
+        )
+        today_course = self._daily_courses(
+            datetime.combine(today, dt_time(9, 0), tzinfo=SHANGHAI_TZ)
+        )
+        plugin._storage.save_bindings(
+            {
+                "u1": self._binding("u1", "IdleBob"),
+                "u2": self._binding("u2", "Alice"),
+            }
+        )
+        # IdleBob 的课全在明天 → 今天时长 0,不上榜
+        plugin._load_series = (
+            lambda b: tomorrow_course if b.user_id == "u1" else today_course
+        )
+
+        data = plugin._collect_study_rank(
+            list(plugin._storage.load_bindings().values()),
+            datetime.now(timezone.utc),
+            "日",
+        )
+        assert [r["nickname"] for r in data["rows"]] == ["Alice"]
+
+    def test_tie_broken_by_nickname(self, plugin):
+        """时长并列时按昵称排序。"""
+        from datetime import time as dt_time
+
+        today = datetime.now(SHANGHAI_TZ).date()
+        same = self._daily_courses(
+            datetime.combine(today, dt_time(9, 0), tzinfo=SHANGHAI_TZ)
+        )
+        plugin._storage.save_bindings(
+            {
+                "u1": self._binding("u1", "Bob"),
+                "u2": self._binding("u2", "Alice"),
+            }
+        )
+        plugin._load_series = lambda b: same
+
+        data = plugin._collect_study_rank(
+            list(plugin._storage.load_bindings().values()),
+            datetime.now(timezone.utc),
+            "日",
+        )
+        assert [r["nickname"] for r in data["rows"]] == ["Alice", "Bob"]
+        assert [r["rank"] for r in data["rows"]] == [1, 2]
+
+    def test_week_mode_sums_whole_week(self, plugin):
+        """周榜:本周每天的课都计入,标题与日期范围正确。"""
+        from datetime import time as dt_time
+
+        from astrbot_plugin_course.schedule_engine import week_start
+
+        monday = week_start(datetime.now(SHANGHAI_TZ).date())
+        daily = self._daily_courses(
+            datetime.combine(monday, dt_time(9, 0), tzinfo=SHANGHAI_TZ)
+        )
+        daily[0] = CourseSeries(
+            summary="高等数学",
+            dtstart=daily[0].dtstart,
+            duration=daily[0].duration,
+            location="明理楼302",
+            rrule_text="FREQ=DAILY",
+        )
+        plugin._storage.save_bindings({"u1": self._binding("u1", "Alice")})
+        plugin._load_series = lambda b: daily
+
+        async def ok_render(template, data, options=None):
+            return "http://fake/week_rank.png"
+
+        plugin.html_render = ok_render
+        results = self._run(
+            plugin, FakeEvent("x", unified_msg_origin="group:1"), "study_week_rank"
+        )
+        assert results == [("image", "http://fake/week_rank.png")]
+
+        data = plugin._collect_study_rank(
+            list(plugin._storage.load_bindings().values()),
+            datetime.now(timezone.utc),
+            "周",
+        )
+        assert data["title"] == "本周上课时长榜"
+        assert "~" in data["range"]  # 日期范围 09-07 ~ 09-13
+        assert data["rows"][0]["count"] == 7  # 本周一到周日每天一节
+        assert data["rows"][0]["total"] == "11 小时 5 分"  # 665 分钟
+
+    def test_default_mode_is_day(self, plugin):
+        """日榜命令固定统计各自时区的今天。"""
+        plugin._storage.save_bindings({"u1": self._binding("u1", "Alice")})
+        plugin._load_series = lambda b: []
+
+        results = self._run(plugin, FakeEvent("x", unified_msg_origin="group:1"))
+        assert len(results) == 1
+        data = plugin._collect_study_rank(
+            list(plugin._storage.load_bindings().values()),
+            datetime.now(timezone.utc),
+            "日",
+        )
+        assert data["title"] == "今日上课时长榜"
+        assert data["rows"] == []  # 空课表 → 空榜
+
+    def test_renders_image_with_fallback_text(self, plugin):
+        """渲染成功发图片;失败退文字兜底(奖牌名次+节数)。"""
+        from datetime import time as dt_time
+
+        today = datetime.now(SHANGHAI_TZ).date()
+        courses = self._daily_courses(
+            datetime.combine(today, dt_time(9, 0), tzinfo=SHANGHAI_TZ)
+        )
+        plugin._storage.save_bindings({"u1": self._binding("u1", "Alice")})
+        plugin._load_series = lambda b: courses
+
+        async def ok_render(template, data, options=None):
+            return "http://fake/rank.png"
+
+        plugin.html_render = ok_render
+        results = self._run(plugin, FakeEvent("x", unified_msg_origin="group:1"))
+        assert results == [("image", "http://fake/rank.png")]
+
+        plugin._render_cache.clear()  # 避免命中上次渲染缓存
+
+        async def bad_render(template, data, options=None):
+            raise RuntimeError("boom")
+
+        plugin.html_render = bad_render
+        results = self._run(plugin, FakeEvent("x", unified_msg_origin="group:1"))
+        text = results[0]
+        assert "🏆" in text and "今日上课时长榜" in text
+        assert "🥇 Alice" in text and "共 1 节" in text
+
+    def test_text_fallback_empty_rank(self, plugin):
+        plugin._storage.save_bindings({"u1": self._binding("u1", "Alice")})
+        plugin._load_series = lambda b: []
+        data = plugin._collect_study_rank(
+            list(plugin._storage.load_bindings().values()),
+            datetime.now(timezone.utc),
+            "日",
+        )
+        text = _study_rank_text(data)
+        assert "本榜周期内暂无上课记录" in text
 

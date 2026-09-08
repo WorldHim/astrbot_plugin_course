@@ -109,6 +109,37 @@ def week_start(d: date) -> date:
     return d - timedelta(days=d.weekday())
 
 
+def class_time_in_window(
+    series_list: Sequence[CourseSeries],
+    window_start_local: datetime,
+    window_end_local: datetime,
+    tz: tzinfo = SHANGHAI_TZ,
+) -> Tuple[int, int]:
+    """统计时间窗内的上课总时长,返回 (总秒数, 课次数)。
+
+    - 事件与窗口取交集:跨界课程只计入窗口内的部分;展开窗口前后
+      各放宽 1 天,保证跨越窗口边界的课程不会被漏掉;
+    - 全天事件没有精确时长,不计入;
+    - 重叠课程按时长简单求和(不做并集去重);
+    - 事件时间为 tz 当地时间,窗口参数应为同基准的 aware datetime。
+    """
+    ws = window_start_local.astimezone(_UTC)
+    we = window_end_local.astimezone(_UTC)
+    total_seconds = 0
+    count = 0
+    for e in _expand_series(
+        series_list, ws - timedelta(days=1), we + timedelta(days=1), tz
+    ):
+        if e.all_day:
+            continue
+        start = max(e.start_time, window_start_local)
+        end = min(e.end_time, window_end_local)
+        if end > start:
+            total_seconds += int((end - start).total_seconds())
+            count += 1
+    return total_seconds, count
+
+
 @dataclass(frozen=True)
 class ReminderHit:
     user_id: str

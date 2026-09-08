@@ -1,9 +1,10 @@
 """schedule_engine 单元测试:按需展开、日界时区、EXDATE、提醒窗口边界。"""
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from astrbot_plugin_course.schedule_engine import (
     SHANGHAI_TZ,
+    class_time_in_window,
     current_or_next_event,
     day_events,
     upcoming_within_15m,
@@ -214,4 +215,65 @@ class TestWeekEvents:
         s = series(datetime(2026, 9, 13, 10, 0, tzinfo=SH))  # 周日
         week_lists = week_events([s], date(2026, 9, 7), SH)
         assert len(week_lists[6]) == 1  # 周日位置
+
+
+class TestClassTimeInWindow:
+    """class_time_in_window:统计窗口内的上课总时长与课次数。"""
+
+    @staticmethod
+    def _day_window(day: date, tz=SH):
+        start = datetime.combine(day, dt_time.min, tzinfo=tz)
+        return start, start + timedelta(days=1)
+
+    def test_sums_courses_in_window(self):
+        day = datetime.now(SH).date()
+        courses = [
+            series(datetime.combine(day, dt_time(9, 0), tzinfo=SH), summary="数学"),
+            series(datetime.combine(day, dt_time(14, 0), tzinfo=SH), summary="英语"),
+        ]
+        secs, count = class_time_in_window(
+            courses, *self._day_window(day), SH
+        )
+        assert (secs, count) == (2 * 95 * 60, 2)
+
+    def test_clips_course_crossing_window_start(self):
+        """昨天深夜开课、延续到今天凌晨的课:只计入今天窗口内的部分。"""
+        today = datetime.now(SH).date()
+        yesterday_start = datetime.combine(
+            today - timedelta(days=1), dt_time(23, 30), tzinfo=SH
+        )  # 23:30 开课,95 分钟 → 次日 01:05 结束
+        s = series(yesterday_start)
+        secs, count = class_time_in_window([s], *self._day_window(today), SH)
+        assert (secs, count) == (65 * 60, 1)  # 只计今天 00:00-01:05 的 65 分钟
+
+    def test_course_ending_before_window_not_counted(self):
+        today = datetime.now(SH).date()
+        s = series(
+            datetime.combine(today - timedelta(days=2), dt_time(9, 0), tzinfo=SH)
+        )
+        assert class_time_in_window([s], *self._day_window(today), SH) == (0, 0)
+
+    def test_all_day_event_not_counted(self):
+        """全天事件没有精确时长,不计入时长榜。"""
+        day = datetime.now(SH).date()
+        s = series(datetime.combine(day, dt_time.min, tzinfo=SH), all_day=True)
+        assert class_time_in_window([s], *self._day_window(day), SH) == (0, 0)
+
+    def test_exdate_cancelled_occurrence_not_counted(self):
+        today = datetime.now(SH).date()
+        start = datetime.combine(today, dt_time(9, 0), tzinfo=SH)
+        s = series(start, exdates=frozenset({start.astimezone(timezone.utc)}))
+        assert class_time_in_window([s], *self._day_window(today), SH) == (0, 0)
+
+    def test_week_window_sums_daily_course(self):
+        """周窗口:DAILY 课程每天都有一节,整周 7 节全部计入。"""
+        monday = week_start(datetime.now(SH).date())
+        s = series(
+            datetime.combine(monday, dt_time(9, 0), tzinfo=SH),
+            rrule="FREQ=DAILY",
+        )
+        win_start = datetime.combine(monday, dt_time.min, tzinfo=SH)
+        win_end = win_start + timedelta(days=7)
+        secs, count = class_time_in_window([s], win_start, win_end, SH)
+        assert (secs, count) == (7 * 95 * 60, 7)
 

@@ -489,3 +489,102 @@ GROUP_TMPL = r"""
 </body>
 </html>
 """
+
+RANK_TMPL = r"""
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width={{ page_width | default(480) }}, initial-scale=1" />
+  <style>
+    :root {
+      --bg: #ffffff;
+      --text-main: #1e293b;
+      --text-muted: #64748b;
+      --accent: #3b82f6;
+      --accent-soft: #eff6ff;
+      --card-bg: #f8fafc;
+      --border: #e2e8f0;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html { width: fit-content; background: var(--bg); }
+    body {
+      background: var(--bg);
+      font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+      width: {{ page_width | default(480) }}px;
+    }
+    .container { padding: 24px; background: var(--bg); }
+    .header {
+      margin-bottom: 18px;
+      padding-bottom: 14px;
+      border-bottom: 2px solid var(--accent-soft);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .header h1 { font-size: 22px; font-weight: 900; color: var(--text-main); }
+    .range-badge {
+      font-size: 13px; color: var(--accent); font-weight: 700;
+      background: var(--accent-soft); padding: 4px 12px; border-radius: 8px;
+    }
+    .stack { display: flex; flex-direction: column; gap: 10px; }
+    .rank-row {
+      display: flex; align-items: center; gap: 12px;
+      background: var(--card-bg); border: 1px solid var(--border);
+      border-radius: 14px; padding: 10px 14px;
+    }
+    .rank-badge {
+      width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 14px; font-weight: 900; color: #fff;
+    }
+    .r1 { background: linear-gradient(135deg, #fbbf24, #f59e0b); }
+    .r2 { background: linear-gradient(135deg, #cbd5e1, #94a3b8); }
+    .r3 { background: linear-gradient(135deg, #fdba74, #ea580c); }
+    .r-other { background: var(--accent-soft); color: var(--accent); }
+    .avatar {
+      width: 36px; height: 36px; border-radius: 50%;
+      object-fit: cover; border: 1px solid var(--border); background: var(--accent-soft);
+    }
+    .m-col { flex: 1; min-width: 0; }
+    .m-name {
+      font-size: 14px; font-weight: 700; color: var(--text-main);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .m-count { font-size: 12px; color: var(--text-muted); font-weight: 600; margin-top: 2px; }
+    .m-total { font-size: 17px; font-weight: 900; color: var(--accent); white-space: nowrap; }
+    .empty {
+      background: var(--card-bg); border: 1px solid var(--border);
+      border-radius: 16px; padding: 22px; text-align: center;
+      font-size: 15px; font-weight: 700; color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>🏆 {{ title }}</h1>
+      <div class="range-badge">{{ range }}</div>
+    </div>
+    <div class="stack">
+      {% if rows %}
+        {% for r in rows %}
+          <div class="rank-row">
+            <div class="rank-badge {% if r.rank == 1 %}r1{% elif r.rank == 2 %}r2{% elif r.rank == 3 %}r3{% else %}r-other{% endif %}">{{ r.rank }}</div>
+            <img class="avatar" src="{{ r.avatar }}"
+                 onerror="this.onerror=null;this.style.visibility='hidden'" />
+            <div class="m-col">
+              <div class="m-name">{{ r.nickname }}</div>
+              <div class="m-count">共 {{ r.count }} 节课</div>
+            </div>
+            <div class="m-total">{{ r.total }}</div>
+          </div>
+        {% endfor %}
+      {% else %}
+        <div class="empty">本榜周期内暂无上课记录</div>
+      {% endif %}
+    </div>
+  </div>
+</body>
+</html>
+"""
