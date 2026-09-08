@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from typing import FrozenSet, Optional
 
 # 默认时区:东八区。全插件统一从本模块导出(单一来源)。
 SHANGHAI_TZ = timezone(timedelta(hours=8))
 
 
-def resolve_timezone(name: str):
+def resolve_timezone(name: str) -> tzinfo:
     """按 IANA 名称解析时区;无效名称回退东八区。"""
     try:
         from zoneinfo import ZoneInfo
@@ -93,6 +93,6 @@ class UserBinding:
     daily_push_job_id: str = ""
     timezone_name: str = "Asia/Shanghai"  # 用户所在时区(IANA 名称)
 
-    def get_timezone(self):
-        """用户所在时区;配置无效时回退东八区。"""
+    def get_timezone(self) -> tzinfo:
+        """用户所在时区;配置无效时回退东八区(ZoneInfo 或固定偏移 timezone)。"""
         return resolve_timezone(self.timezone_name)

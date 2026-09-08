@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time as dt_time, timedelta, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone, tzinfo
 from functools import lru_cache
 from typing import List, Sequence
 
@@ -18,7 +18,7 @@ def _build_rule(rrule_text: str, dtstart_iso: str):
     return rrulestr(rrule_text, dtstart=datetime.fromisoformat(dtstart_iso))
 
 
-def _to_event(series: CourseSeries, occ_utc: datetime, tz=SHANGHAI_TZ) -> CourseEvent:
+def _to_event(series: CourseSeries, occ_utc: datetime, tz: tzinfo = SHANGHAI_TZ) -> CourseEvent:
     local = occ_utc.astimezone(tz)
     return CourseEvent(
         summary=series.summary,
@@ -34,7 +34,7 @@ def _expand_series(
     series_list: Sequence[CourseSeries],
     win_start_utc: datetime,
     win_end_utc: datetime,
-    tz=SHANGHAI_TZ,
+    tz: tzinfo = SHANGHAI_TZ,
 ) -> List[CourseEvent]:
     """把课程规则展开到指定时间窗内(区间由调用方即查询方决定)。
 
@@ -70,7 +70,7 @@ def _expand_series(
 def day_events(
     series_list: Sequence[CourseSeries],
     target_date: date,
-    tz=SHANGHAI_TZ,
+    tz: tzinfo = SHANGHAI_TZ,
 ) -> List[CourseEvent]:
     """取 tz 时区自然日 target_date 的课程(默认东八区;含重复展开,含已过去的日期)。"""
     day_start = datetime.combine(
@@ -83,7 +83,7 @@ def day_events(
 def week_events(
     series_list: Sequence[CourseSeries],
     week_monday: date,
-    tz=SHANGHAI_TZ,
+    tz: tzinfo = SHANGHAI_TZ,
 ) -> List[List[CourseEvent]]:
     """一次展开整周(周一起的 7 天)并按天分组。
 
@@ -121,7 +121,7 @@ def upcoming_within_15m(
     user_id: str,
     events: Sequence[CourseSeries],
     advance_minutes: int = 15,
-    tz=SHANGHAI_TZ,
+    tz: tzinfo = SHANGHAI_TZ,
 ) -> List[ReminderHit]:
     """按需展开 (now, now+advance] 内开课的课程;命中条件与旧版完全一致。
 

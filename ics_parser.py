@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, time as dt_time, timedelta, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Optional
 
@@ -20,7 +20,7 @@ def _attach_tz(dt: datetime, tz) -> datetime:
     return dt
 
 
-def _collect_exdates(component, default_tz=SHANGHAI_TZ) -> frozenset[datetime]:
+def _collect_exdates(component, default_tz: tzinfo = SHANGHAI_TZ) -> frozenset[datetime]:
     """收集 VEVENT 的 EXDATE(取消的课次),统一转成 UTC。
 
     兼容单行多值、多个 EXDATE 行等写法;naive 值按 default_tz 解释,
@@ -72,7 +72,7 @@ class IcsParser:
             self._cache.pop(key, None)
 
     def parse_ics_file(
-        self, file_path: str, default_tz=SHANGHAI_TZ
+        self, file_path: str, default_tz: tzinfo = SHANGHAI_TZ
     ) -> Optional[list[CourseSeries]]:
         """解析 ics 为课程规则列表。
 
@@ -147,6 +147,13 @@ class IcsParser:
                         raw_start, dt_time.min, tzinfo=default_tz
                     )
                 else:
+                    if not isinstance(raw_start, datetime):
+                        # 非全天事件要求 DTSTART 为 DATETIME 型(纯日期会走进
+                        # 上面的 all_day 分支),其余类型属于畸形数据,直接跳过。
+                        logger.warning(
+                            "[course] skip invalid vevent: dtstart is not a datetime"
+                        )
+                        continue
                     if raw_end is None:
                         logger.warning("[course] skip invalid vevent: missing dtend")
                         continue
