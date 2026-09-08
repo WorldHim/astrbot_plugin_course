@@ -21,6 +21,7 @@ def _to_event(series: CourseSeries, occ_utc: datetime) -> CourseEvent:
         end_time=local + series.duration,
         location=series.location,
         description=series.description,
+        all_day=series.all_day,
     )
 
 
@@ -92,4 +93,9 @@ def upcoming_within_15m(
     now_utc = now.astimezone(_UTC)
     win_end = now_utc + timedelta(minutes=advance_minutes)
     expanded = _expand_series(events, now_utc + timedelta(microseconds=1), win_end)
-    return [ReminderHit(user_id=user_id, event=e) for e in expanded]
+    # 全天课程没有精确的"即将开课"时刻,不参与开课提醒(避免深夜误报)
+    return [
+        ReminderHit(user_id=user_id, event=e)
+        for e in expanded
+        if not e.all_day
+    ]

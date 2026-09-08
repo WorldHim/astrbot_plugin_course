@@ -695,10 +695,14 @@ class CoursePlugin(Star):
 
 
 def _event_view(e: CourseEvent) -> Dict[str, str]:
+    if e.all_day:
+        time_range = "全天"
+    else:
+        time_range = f"{e.start_time.strftime('%H:%M')} - {e.end_time.strftime('%H:%M')}"
     return {
         "summary": e.summary,
         "location": e.location or "",
-        "time_range": f"{e.start_time.strftime('%H:%M')} - {e.end_time.strftime('%H:%M')}",
+        "time_range": time_range,
     }
 
 

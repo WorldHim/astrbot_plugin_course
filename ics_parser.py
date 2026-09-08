@@ -109,19 +109,38 @@ class IcsParser:
                 location = str(component.get("location") or "")
                 dtstart_obj = component.get("dtstart")
                 dtend_obj = component.get("dtend")
-                if not dtstart_obj or not dtend_obj:
-                    logger.warning("[course] skip invalid vevent: missing dtstart/dtend")
+                if not dtstart_obj:
+                    logger.warning("[course] skip invalid vevent: missing dtstart")
                     continue
-                dtstart = dtstart_obj.dt
-                dtend = dtend_obj.dt
+                raw_start = dtstart_obj.dt
+                raw_end = dtend_obj.dt if dtend_obj else None
 
-                if isinstance(dtstart, date) and not isinstance(dtstart, datetime):
-                    dtstart = datetime.combine(dtstart, dt_time.min)
-                if isinstance(dtend, date) and not isinstance(dtend, datetime):
-                    dtend = datetime.combine(dtend, dt_time.min)
+                # 全天事件:DTSTART 为纯日期(DATE 型)。RFC 5545 规定 DTEND 为
+                # 排他结束日期,缺省时默认持续 1 天。
+                all_day = isinstance(raw_start, date) and not isinstance(
+                    raw_start, datetime
+                )
 
-                dtstart = _as_shanghai(dtstart)
-                dtend = _as_shanghai(dtend)
+                if all_day:
+                    if raw_end is None:
+                        days = 1
+                    elif isinstance(raw_end, date) and not isinstance(raw_end, datetime):
+                        days = (raw_end - raw_start).days
+                    else:
+                        days = (raw_end.date() - raw_start).days
+                    duration = timedelta(days=days if days >= 1 else 1)
+                    dtstart = datetime.combine(
+                        raw_start, dt_time.min, tzinfo=SHANGHAI_TZ
+                    )
+                else:
+                    if raw_end is None:
+                        logger.warning("[course] skip invalid vevent: missing dtend")
+                        continue
+                    if isinstance(raw_end, date) and not isinstance(raw_end, datetime):
+                        raw_end = datetime.combine(raw_end, dt_time.min)
+                    dtstart = _as_shanghai(raw_start)
+                    dtend = _as_shanghai(raw_end)
+                    duration = dtend - dtstart
 
                 rrule_prop = component.get("rrule")
                 rrule_text: Optional[str] = None
@@ -143,11 +162,12 @@ class IcsParser:
                     CourseSeries(
                         summary=summary,
                         dtstart=dtstart,
-                        duration=dtend - dtstart,
+                        duration=duration,
                         location=location,
                         description=description,
                         rrule_text=rrule_text,
                         exdates_utc=_collect_exdates(component),
+                        all_day=all_day,
                     )
                 )
             except Exception as e:

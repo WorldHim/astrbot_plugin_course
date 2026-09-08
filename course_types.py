@@ -22,6 +22,7 @@ class CourseSeries:
     rrule_text: Optional[str] = None  # None 表示单次日程,无重复
     # EXDATE 排除(取消)的具体出现时刻,统一为 UTC,便于与展开结果精确比较
     exdates_utc: FrozenSet[datetime] = frozenset()
+    all_day: bool = False  # 全天事件(DTSTART 为纯日期,展示为「全天」)
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,7 @@ class CourseEvent:
     end_time: datetime
     location: str = ""
     description: str = ""
+    all_day: bool = False  # 全天事件,展示为「全天」
 
     def reminder_key(self) -> str:
         return "|".join(

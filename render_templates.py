@@ -106,8 +106,12 @@ DAY_TMPL = r"""
         {% for c in courses %}
           <div class="course-card">
             <div class="time-slot">
-              <span class="time-start">{{ c.time_range.split(' - ')[0] }}</span>
-              <span class="time-end">{{ c.time_range.split(' - ')[1] }}</span>
+              {% if ' - ' in c.time_range %}
+                <span class="time-start">{{ c.time_range.split(' - ')[0] }}</span>
+                <span class="time-end">{{ c.time_range.split(' - ')[1] }}</span>
+              {% else %}
+                <span class="time-start">{{ c.time_range }}</span>
+              {% endif %}
             </div>
             <div class="course-info">
               <div class="course-name">{{ c.summary }}</div>
