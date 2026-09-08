@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Optional, Set
 
@@ -15,8 +15,8 @@ from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.utils.io import download_file
 from astrbot.core.utils.session_waiter import SessionController, session_waiter
 
-from .course_types import CourseEvent, CourseSeries, UserBinding
-from .ics_parser import IcsParser, SHANGHAI_TZ
+from .course_types import CourseEvent, CourseSeries, SHANGHAI_TZ, UserBinding
+from .ics_parser import IcsParser
 from .render_templates import DAY_TMPL, WEEK_TMPL
 from .schedule_engine import day_events, upcoming_within_15m, week_start
 from .storage import CourseStorage
@@ -330,11 +330,46 @@ class CoursePlugin(Star):
         push_status = "已开启" if binding.enable_daily_push else "已关闭"
         settings_text = (
             f"当前设置：\n"
+            f"时区：{binding.timezone_name}\n"
             f"每日推送：{push_status}\n"
             f"推送时间：{binding.daily_push_time}\n"
             f"提前提醒：{binding.reminder_advance_minutes} 分钟"
         )
         yield event.plain_result(settings_text)
+
+    @filter.command("设置时区")
+    async def set_timezone(self, event: AstrMessageEvent):
+        """设置课表使用的时区(IANA 名称,如 Asia/Shanghai)。"""
+        user_id = str(event.get_sender_id())
+        binding = self._storage.get_binding(user_id)
+        if not binding:
+            yield event.plain_result("你还没有绑定课表。请先使用 /绑定课表")
+            return
+
+        raw = (event.message_str or "").strip()
+        idx = raw.find("设置时区")
+        arg = (raw[idx + len("设置时区"):] if idx >= 0 else raw).strip()
+        if not arg:
+            yield event.plain_result(
+                "请在指令后带上 IANA 时区名，例如：\n"
+                "/设置时区 Asia/Shanghai\n"
+                "/设置时区 America/New_York"
+            )
+            return
+
+        tz = _resolve_timezone(arg)
+        if tz is None:
+            yield event.plain_result(
+                f"无法识别时区「{arg}」，请使用 IANA 名称，"
+                "如 Asia/Shanghai、America/New_York、Europe/London。"
+            )
+            return
+
+        bindings = self._storage.load_bindings()
+        if user_id in bindings:
+            bindings[user_id].timezone_name = arg
+            self._storage.save_bindings(bindings)
+        yield event.plain_result(f"时区已设置为：{arg}")
 
     @filter.command("今日课表")
     async def today(self, event: AstrMessageEvent):
@@ -361,14 +396,15 @@ class CoursePlugin(Star):
             )
             return
 
-        now = datetime.now(SHANGHAI_TZ)
+        user_tz = binding.get_timezone()
+        now = datetime.now(user_tz)
         today_date = now.date()
         start = week_start(today_date)
         days = []
         labels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
         for i in range(7):
             d = start + timedelta(days=i)
-            day_list = day_events(series, d)
+            day_list = day_events(series, d, user_tz)
             days.append(
                 {
                     "label": labels[i],
@@ -407,14 +443,15 @@ class CoursePlugin(Star):
             )
             return
 
-        now = datetime.now(SHANGHAI_TZ)
+        user_tz = binding.get_timezone()
+        now = datetime.now(user_tz)
         today_date = now.date()
         start = week_start(today_date) + timedelta(days=7)
         days = []
         labels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
         for i in range(7):
             d = start + timedelta(days=i)
-            day_list = day_events(series, d)
+            day_list = day_events(series, d, user_tz)
             days.append(
                 {
                     "label": labels[i],
@@ -445,7 +482,9 @@ class CoursePlugin(Star):
         调用方应向用户提示重新绑定。
         """
         ics_path = (self._storage._base_dir / binding.ics_file).resolve()
-        series = self._parser.parse_ics_file(str(ics_path))
+        series = self._parser.parse_ics_file(
+            str(ics_path), default_tz=binding.get_timezone()
+        )
         if series is None:
             logger.error(
                 f"[course] failed to load ics for user {binding.user_id}: {ics_path}"
@@ -466,9 +505,10 @@ class CoursePlugin(Star):
             )
             return
 
-        now = datetime.now(SHANGHAI_TZ)
+        user_tz = binding.get_timezone()
+        now = datetime.now(user_tz)
         target = now.date() + timedelta(days=day_offset)
-        day_list = day_events(series, target)
+        day_list = day_events(series, target, user_tz)
 
         title = "今日课表" if day_offset == 0 else "明日课表"
         subtitle = f"{binding.nickname} | {target.strftime('%Y-%m-%d')}"
@@ -576,9 +616,10 @@ class CoursePlugin(Star):
                     f"[course] daily push skipped: ics load failed for user {user_id}"
                 )
                 return
-            now = datetime.now(SHANGHAI_TZ)
+            user_tz = binding.get_timezone()
+            now = datetime.now(user_tz)
             today = now.date()
-            day_list = day_events(series, today)
+            day_list = day_events(series, today, user_tz)
 
             title = "今日课表"
             subtitle = f"{binding.nickname} | {today.strftime('%Y-%m-%d')}"
@@ -617,10 +658,12 @@ class CoursePlugin(Star):
         if not bindings:
             return
 
-        now = datetime.now(SHANGHAI_TZ)
-        self._cleanup_reminded(now)
+        now_utc = datetime.now(timezone.utc)
+        self._cleanup_reminded(now_utc)
         for user_id, binding in bindings.items():
             try:
+                user_tz = binding.get_timezone()
+                now = now_utc.astimezone(user_tz)
                 series = self._load_series(binding)
                 if series is None:
                     # 课表文件缺失或解析失败:本轮跳过该用户的提醒(错误已由解析器记录)
@@ -630,6 +673,7 @@ class CoursePlugin(Star):
                     user_id=user_id,
                     events=series,
                     advance_minutes=binding.reminder_advance_minutes,
+                    tz=user_tz,
                 )
                 if not hits:
                     continue
@@ -692,6 +736,16 @@ class CoursePlugin(Star):
                 self._reminded[user_id] = kept
             else:
                 self._reminded.pop(user_id, None)
+
+
+def _resolve_timezone(name: str):
+    """按 IANA 名称解析时区;无法识别返回 None。"""
+    try:
+        from zoneinfo import ZoneInfo
+
+        return ZoneInfo(name)
+    except Exception:
+        return None
 
 
 def _event_view(e: CourseEvent) -> Dict[str, str]:

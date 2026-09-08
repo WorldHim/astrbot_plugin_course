@@ -8,24 +8,23 @@ from astrbot.api import logger
 from icalendar import Calendar
 from dateutil.rrule import rrulestr
 
-from .course_types import CourseSeries
+from .course_types import CourseSeries, SHANGHAI_TZ
 
-
-SHANGHAI_TZ = timezone(timedelta(hours=8))
 _UTC = timezone.utc
 
 
-def _as_shanghai(dt: datetime) -> datetime:
-    """统一到东八区;naive 时间默认视为上海时间。"""
+def _attach_tz(dt: datetime, tz) -> datetime:
+    """给 naive 时间附加时区;aware 时间保留其原时区(不再强制转换)。"""
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=SHANGHAI_TZ)
-    return dt.astimezone(SHANGHAI_TZ)
+        return dt.replace(tzinfo=tz)
+    return dt
 
 
-def _collect_exdates(component) -> frozenset[datetime]:
+def _collect_exdates(component, default_tz=SHANGHAI_TZ) -> frozenset[datetime]:
     """收集 VEVENT 的 EXDATE(取消的课次),统一转成 UTC。
 
-    兼容单行多值、多个 EXDATE 行等写法;纯日期值按当天 0 点(上海)处理。
+    兼容单行多值、多个 EXDATE 行等写法;naive 值按 default_tz 解释,
+    纯日期值按 default_tz 当天 0 点处理。
     """
     out: set[datetime] = set()
     prop = component.get("exdate")
@@ -42,10 +41,10 @@ def _collect_exdates(component) -> frozenset[datetime]:
         )
         for value in raw_list:
             if isinstance(value, datetime):
-                out.add(_as_shanghai(value).astimezone(_UTC))
+                out.add(_attach_tz(value, default_tz).astimezone(_UTC))
             elif isinstance(value, date):
                 out.add(
-                    datetime.combine(value, dt_time.min, tzinfo=SHANGHAI_TZ).astimezone(_UTC)
+                    datetime.combine(value, dt_time.min, tzinfo=default_tz).astimezone(_UTC)
                 )
     return frozenset(out)
 
@@ -59,21 +58,27 @@ class IcsParser:
     - 展开区间=查询区间:本周已过去的日期(如周一)不会被裁掉;
     - 不带 COUNT/UNTIL 的无限重复规则也不会被无限展开;
     - 缓存的是规则而非“按天展开的快照”,不会因跨天/换周而过时;
-    - 文件缺失或格式非法时返回 None,与“解析成功但没有课程”([])相区分。
+    - 缓存的是规则而非“按天展开的快照”,不会因跨天/换周而过时;
+    - 文件缺失或格式非法时返回 None,与“解析成功但没有课程”([])相区分;
+    - default_tz 用于解释无 TZID 的 naive 时间(默认东八区);带 TZID 的事件保留原时区。
     """
 
     def __init__(self):
-        # ics 路径 -> (文件 mtime, 规则列表);文件被覆盖(mtime 变化)后自动重新解析
-        self._cache: dict[str, tuple[float, list[CourseSeries]]] = {}
+        # (ics 路径, 默认时区名) -> (文件 mtime, 规则列表);文件被覆盖(mtime 变化)后自动重新解析
+        self._cache: dict[tuple[str, str], tuple[float, list[CourseSeries]]] = {}
 
     def clear_cache(self, ics_path: str) -> None:
-        self._cache.pop(ics_path, None)
+        for key in [k for k in self._cache if k[0] == ics_path]:
+            self._cache.pop(key, None)
 
-    def parse_ics_file(self, file_path: str) -> Optional[list[CourseSeries]]:
+    def parse_ics_file(
+        self, file_path: str, default_tz=SHANGHAI_TZ
+    ) -> Optional[list[CourseSeries]]:
         """解析 ics 为课程规则列表。
 
         返回 None 表示文件缺失或格式非法(调用方应提示用户重新绑定);
         返回空列表仅表示文件有效但其中没有任何课程。
+        default_tz:解释无 TZID 的 naive 时间的默认时区(默认东八区)。
         """
         try:
             mtime = Path(file_path).stat().st_mtime
@@ -81,7 +86,9 @@ class IcsParser:
             logger.error(f"[course] cannot stat ics: {e}")
             return None
 
-        cached = self._cache.get(file_path)
+        tz_name = getattr(default_tz, "key", None) or str(default_tz)
+        cache_key = (file_path, tz_name)
+        cached = self._cache.get(cache_key)
         if cached is not None and cached[0] == mtime:
             return cached[1]
 
@@ -130,7 +137,7 @@ class IcsParser:
                         days = (raw_end.date() - raw_start).days
                     duration = timedelta(days=days if days >= 1 else 1)
                     dtstart = datetime.combine(
-                        raw_start, dt_time.min, tzinfo=SHANGHAI_TZ
+                        raw_start, dt_time.min, tzinfo=default_tz
                     )
                 else:
                     if raw_end is None:
@@ -138,8 +145,8 @@ class IcsParser:
                         continue
                     if isinstance(raw_end, date) and not isinstance(raw_end, datetime):
                         raw_end = datetime.combine(raw_end, dt_time.min)
-                    dtstart = _as_shanghai(raw_start)
-                    dtend = _as_shanghai(raw_end)
+                    dtstart = _attach_tz(raw_start, default_tz)
+                    dtend = _attach_tz(raw_end, default_tz)
                     duration = dtend - dtstart
 
                 rrule_prop = component.get("rrule")
@@ -154,7 +161,7 @@ class IcsParser:
                         ):
                             until_dt = datetime.combine(until_dt, dt_time.max)
                         if until_dt.tzinfo is None:
-                            until_dt = until_dt.replace(tzinfo=SHANGHAI_TZ)
+                            until_dt = until_dt.replace(tzinfo=default_tz)
                         rrule_prop["UNTIL"][0] = until_dt.astimezone(_UTC)
                     rrule_text = rrule_prop.to_ical().decode()
 
@@ -166,7 +173,7 @@ class IcsParser:
                         location=location,
                         description=description,
                         rrule_text=rrule_text,
-                        exdates_utc=_collect_exdates(component),
+                        exdates_utc=_collect_exdates(component, default_tz),
                         all_day=all_day,
                     )
                 )
@@ -175,5 +182,5 @@ class IcsParser:
                 continue
 
         series_list.sort(key=lambda s: s.dtstart)
-        self._cache[file_path] = (mtime, series_list)
+        self._cache[cache_key] = (mtime, series_list)
         return series_list

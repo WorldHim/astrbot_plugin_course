@@ -49,6 +49,7 @@ class CourseStorage:
                         item.get("reminder_advance_minutes", 15)
                     ),
                     daily_push_job_id=str(item.get("daily_push_job_id", "")),
+                    timezone_name=str(item.get("timezone_name", "Asia/Shanghai")),
                 )
             return bindings
         except Exception as e:
