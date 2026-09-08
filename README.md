@@ -59,4 +59,12 @@ AstrBot 课表插件：绑定个人课表后，可输出**今日课表 / 明日�
 
 ## 常见问题
 
-- 渲染图片失败：确认 AstrBot 安装了 Playwright 环境，必要时查看 AstrBot 日志中的报错信息。
+- 渲染图片失败：确认 AstrBot 安装了 Playwright 环境，必要时查看 AstrBot 日志中的报错信息。（渲染失败时插件会自动改发文字版课表。）
+
+## 开发
+
+运行单元测试（需 pytest）：
+
+```bash
+python -m pytest tests
+```
