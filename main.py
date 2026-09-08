@@ -13,7 +13,7 @@ from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.utils.io import download_file
 from astrbot.core.utils.session_waiter import SessionController, session_waiter
 
-from .course_types import CourseEvent
+from .course_types import CourseEvent, CourseSeries, UserBinding
 from .ics_parser import IcsParser, SHANGHAI_TZ
 from .render_templates import DAY_TMPL, WEEK_TMPL
 from .schedule_engine import day_events, upcoming_within_15m, week_start
@@ -309,8 +309,12 @@ class CoursePlugin(Star):
             yield event.plain_result("你还没有绑定课表。请先使用 /绑定课表")
             return
 
-        ics_path = (self._storage._base_dir / binding.ics_file).resolve()
-        events = self._parser.parse_ics_file(str(ics_path))
+        series = self._load_series(binding)
+        if series is None:
+            yield event.plain_result(
+                "课表文件读取或解析失败，请重新使用 /绑定课表 上传课表。"
+            )
+            return
 
         now = datetime.now(SHANGHAI_TZ)
         today_date = now.date()
@@ -319,7 +323,7 @@ class CoursePlugin(Star):
         labels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
         for i in range(7):
             d = start + timedelta(days=i)
-            day_list = day_events(events, d)
+            day_list = day_events(series, d)
             days.append(
                 {
                     "label": labels[i],
@@ -351,8 +355,12 @@ class CoursePlugin(Star):
             yield event.plain_result("你还没有绑定课表。请先使用 /绑定课表")
             return
 
-        ics_path = (self._storage._base_dir / binding.ics_file).resolve()
-        events = self._parser.parse_ics_file(str(ics_path))
+        series = self._load_series(binding)
+        if series is None:
+            yield event.plain_result(
+                "课表文件读取或解析失败，请重新使用 /绑定课表 上传课表。"
+            )
+            return
 
         now = datetime.now(SHANGHAI_TZ)
         today_date = now.date()
@@ -361,7 +369,7 @@ class CoursePlugin(Star):
         labels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
         for i in range(7):
             d = start + timedelta(days=i)
-            day_list = day_events(events, d)
+            day_list = day_events(series, d)
             days.append(
                 {
                     "label": labels[i],
@@ -385,6 +393,20 @@ class CoursePlugin(Star):
         )
         yield event.image_result(url)
 
+    def _load_series(self, binding: UserBinding) -> Optional[list[CourseSeries]]:
+        """加载并解析绑定用户的课表。
+
+        返回 None 表示课表文件缺失或解析失败(区别于“没有课程”的空列表),
+        调用方应向用户提示重新绑定。
+        """
+        ics_path = (self._storage._base_dir / binding.ics_file).resolve()
+        series = self._parser.parse_ics_file(str(ics_path))
+        if series is None:
+            logger.error(
+                f"[course] failed to load ics for user {binding.user_id}: {ics_path}"
+            )
+        return series
+
     async def _send_day_schedule(self, event: AstrMessageEvent, *, day_offset: int):
         user_id = str(event.get_sender_id())
         binding = self._storage.get_binding(user_id)
@@ -392,12 +414,16 @@ class CoursePlugin(Star):
             yield event.plain_result("你还没有绑定课表。请先使用 /绑定课表")
             return
 
-        ics_path = (self._storage._base_dir / binding.ics_file).resolve()
-        events = self._parser.parse_ics_file(str(ics_path))
+        series = self._load_series(binding)
+        if series is None:
+            yield event.plain_result(
+                "课表文件读取或解析失败，请重新使用 /绑定课表 上传课表。"
+            )
+            return
 
         now = datetime.now(SHANGHAI_TZ)
         target = now.date() + timedelta(days=day_offset)
-        day_list = day_events(events, target)
+        day_list = day_events(series, target)
 
         title = "今日课表" if day_offset == 0 else "明日课表"
         subtitle = f"{binding.nickname} | {target.strftime('%Y-%m-%d')}"
@@ -499,11 +525,15 @@ class CoursePlugin(Star):
             return
 
         try:
-            ics_path = (self._storage._base_dir / binding.ics_file).resolve()
-            events = self._parser.parse_ics_file(str(ics_path))
+            series = self._load_series(binding)
+            if series is None:
+                logger.warning(
+                    f"[course] daily push skipped: ics load failed for user {user_id}"
+                )
+                return
             now = datetime.now(SHANGHAI_TZ)
             today = now.date()
-            day_list = day_events(events, today)
+            day_list = day_events(series, today)
 
             title = "今日课表"
             subtitle = f"{binding.nickname} | {today.strftime('%Y-%m-%d')}"
@@ -546,12 +576,14 @@ class CoursePlugin(Star):
         self._cleanup_reminded(now)
         for user_id, binding in bindings.items():
             try:
-                ics_path = (self._storage._base_dir / binding.ics_file).resolve()
-                events = self._parser.parse_ics_file(str(ics_path))
+                series = self._load_series(binding)
+                if series is None:
+                    # 课表文件缺失或解析失败:本轮跳过该用户的提醒(错误已由解析器记录)
+                    continue
                 hits = upcoming_within_15m(
                     now=now,
                     user_id=user_id,
-                    events=events,
+                    events=series,
                     advance_minutes=binding.reminder_advance_minutes,
                 )
                 if not hits:

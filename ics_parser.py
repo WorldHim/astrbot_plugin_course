@@ -58,7 +58,8 @@ class IcsParser:
 
     - 展开区间=查询区间:本周已过去的日期(如周一)不会被裁掉;
     - 不带 COUNT/UNTIL 的无限重复规则也不会被无限展开;
-    - 缓存的是规则而非“按天展开的快照”,不会因跨天/换周而过时。
+    - 缓存的是规则而非“按天展开的快照”,不会因跨天/换周而过时;
+    - 文件缺失或格式非法时返回 None,与“解析成功但没有课程”([])相区分。
     """
 
     def __init__(self):
@@ -68,12 +69,17 @@ class IcsParser:
     def clear_cache(self, ics_path: str) -> None:
         self._cache.pop(ics_path, None)
 
-    def parse_ics_file(self, file_path: str) -> list[CourseSeries]:
+    def parse_ics_file(self, file_path: str) -> Optional[list[CourseSeries]]:
+        """解析 ics 为课程规则列表。
+
+        返回 None 表示文件缺失或格式非法(调用方应提示用户重新绑定);
+        返回空列表仅表示文件有效但其中没有任何课程。
+        """
         try:
             mtime = Path(file_path).stat().st_mtime
         except OSError as e:
             logger.error(f"[course] cannot stat ics: {e}")
-            return []
+            return None
 
         cached = self._cache.get(file_path)
         if cached is not None and cached[0] == mtime:
@@ -83,13 +89,13 @@ class IcsParser:
             cal_content = Path(file_path).read_text(encoding="utf-8")
         except Exception as e:
             logger.error(f"[course] cannot read ics: {e}")
-            return []
+            return None
 
         try:
             cal = Calendar.from_ical(cal_content)
         except Exception as e:
             logger.error(f"[course] invalid ics format: {e}")
-            return []
+            return None
 
         series_list: list[CourseSeries] = []
 
