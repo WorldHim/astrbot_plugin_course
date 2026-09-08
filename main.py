@@ -48,7 +48,7 @@ class _SenderSessionFilter(SessionFilter):
         return f"{event.unified_msg_origin}|{event.get_sender_id()}"
 
 # 插件版本(@register 与帮助图片共用;metadata.yaml 的 version 需保持一致)
-PLUGIN_VERSION = "2.5.0"
+PLUGIN_VERSION = "2.5.1"
 
 
 @register(
