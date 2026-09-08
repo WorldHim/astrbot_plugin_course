@@ -121,7 +121,14 @@ class CourseStorage:
         return True
 
     def upsert_binding(
-        self, *, user_id: str, unified_msg_origin: str, nickname: str
+        self,
+        *,
+        user_id: str,
+        unified_msg_origin: str,
+        nickname: str,
+        default_reminder_minutes: int = 15,
+        default_push_time: str = "07:00",
+        default_timezone: str = "Asia/Shanghai",
     ) -> UserBinding:
         bindings = self.load_bindings()
         prev = bindings.get(user_id)
@@ -134,9 +141,12 @@ class CourseStorage:
             ics_file=rel_ics,
             updated_at_ts=time.time(),
             enable_daily_push=prev.enable_daily_push if prev else False,
-            daily_push_time=prev.daily_push_time if prev else "07:00",
-            reminder_advance_minutes=prev.reminder_advance_minutes if prev else 15,
+            daily_push_time=prev.daily_push_time if prev else default_push_time,
+            reminder_advance_minutes=(
+                prev.reminder_advance_minutes if prev else default_reminder_minutes
+            ),
             daily_push_job_id=prev.daily_push_job_id if prev else "",
+            timezone_name=prev.timezone_name if prev else default_timezone,
         )
         bindings[user_id] = binding
         self.save_bindings(bindings)

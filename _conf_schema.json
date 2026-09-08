@@ -1,0 +1,53 @@
+{
+  "reminder_tick_seconds": {
+    "description": "开课提醒检查间隔(秒)",
+    "hint": "越小提醒越准时,开销略增;建议 30-120",
+    "type": "int",
+    "default": 60
+  },
+  "default_reminder_minutes": {
+    "description": "新绑定用户的默认开课提醒提前量(分钟)",
+    "type": "int",
+    "default": 15
+  },
+  "default_push_time": {
+    "description": "新绑定用户的默认每日推送时间(HH:MM)",
+    "type": "string",
+    "default": "07:00"
+  },
+  "default_timezone": {
+    "description": "新绑定用户的默认时区(IANA 名称)",
+    "type": "string",
+    "default": "Asia/Shanghai"
+  },
+  "render_quality": {
+    "description": "课表图片渲染质量(1-100,越大越清晰、文件越大)",
+    "type": "int",
+    "default": 100
+  },
+  "day_render_width": {
+    "description": "日课表渲染宽度(像素)",
+    "type": "int",
+    "default": 500
+  },
+  "week_render_width": {
+    "description": "周课表渲染宽度(像素)",
+    "type": "int",
+    "default": 1280
+  },
+  "max_ics_mb": {
+    "description": "绑定课表文件大小上限(MB)",
+    "type": "int",
+    "default": 5
+  },
+  "reminded_retention_days": {
+    "description": "已提醒记录保留天数(过期自动清理)",
+    "type": "int",
+    "default": 30
+  },
+  "bind_wait_seconds": {
+    "description": "绑定/设置会话的等待时长(秒)",
+    "type": "int",
+    "default": 120
+  }
+}

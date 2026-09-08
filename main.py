@@ -21,9 +21,6 @@ from .render_templates import DAY_TMPL, WEEK_TMPL
 from .schedule_engine import day_events, upcoming_within_15m, week_start
 from .storage import CourseStorage
 
-# 绑定课表时允许的 ics 文件大小上限(ics 课表通常只有几 KB~几百 KB)
-_MAX_ICS_BYTES = 5 * 1024 * 1024
-
 
 @register(
     "astrbot_plugin_course",
@@ -32,9 +29,11 @@ _MAX_ICS_BYTES = 5 * 1024 * 1024
     "1.5.1",
 )
 class CoursePlugin(Star):
-    def __init__(self, context: Context):
+    def __init__(self, context: Context, config=None):
         super().__init__(context)
         self._context = context
+        # AstrBot 会在存在 _conf_schema.json 时注入插件配置(AstrBotConfig,dict 子类)
+        self._config = config
 
         self._storage = CourseStorage(self.name)
         self._parser = IcsParser()
@@ -43,6 +42,24 @@ class CoursePlugin(Star):
         self._stop_event = asyncio.Event()
         self._reminder_task: Optional[asyncio.Task[None]] = None
         self._initializing_lock = asyncio.Lock()
+
+    def _cfg(self, key: str, default):
+        """读取插件配置(WebUI 可调);未注入配置时使用默认值。"""
+        if self._config is None:
+            return default
+        try:
+            value = self._config.get(key, default)
+        except Exception:
+            return default
+        return default if value is None else value
+
+    def _cfg_int(self, key: str, default: int, minimum: int = 1) -> int:
+        """读取整型插件配置;非法或低于下限时回退默认值。"""
+        try:
+            value = int(self._cfg(key, default))
+        except (TypeError, ValueError):
+            return default
+        return value if value >= minimum else default
 
     async def initialize(self):
         # 使用锁防止并发初始化
@@ -115,13 +132,13 @@ class CoursePlugin(Star):
     async def bind(self, event: AstrMessageEvent):
         user_id = str(event.get_sender_id())
         nickname = str(event.get_sender_name())
+        wait_seconds = self._cfg_int("bind_wait_seconds", 120, 10)
 
         yield event.plain_result(
-            "请在 120 秒内发送 .ics 文件。\n"
+            f"请在 {wait_seconds} 秒内发送 .ics 文件。\n"
             "发送\"退出\"可取消。"
         )
 
-        @session_waiter(timeout=120, record_history_chains=False)
         async def waiter(controller: SessionController, evt: AstrMessageEvent):
             text = (evt.message_str or "").strip()
             if text == "退出":
@@ -151,7 +168,8 @@ class CoursePlugin(Star):
                     ics_size = ics_path.stat().st_size
                 except OSError:
                     ics_size = 0
-                if ics_size <= 0 or ics_size > _MAX_ICS_BYTES:
+                max_ics_bytes = self._cfg_int("max_ics_mb", 5, 1) * 1024 * 1024
+                if ics_size <= 0 or ics_size > max_ics_bytes:
                     ics_path.unlink(missing_ok=True)
                     await evt.send(
                         evt.plain_result("收到的文件不是有效的课表，绑定失败，请重新上传。")
@@ -183,6 +201,11 @@ class CoursePlugin(Star):
                     user_id=user_id,
                     unified_msg_origin=evt.unified_msg_origin,
                     nickname=nickname,
+                    default_reminder_minutes=self._cfg_int(
+                        "default_reminder_minutes", 15, 1
+                    ),
+                    default_push_time=self._cfg("default_push_time", "07:00"),
+                    default_timezone=self._cfg("default_timezone", "Asia/Shanghai"),
                 )
                 await evt.send(
                     evt.plain_result(f"绑定成功，共识别到 {len(parsed)} 条课程安排。")
@@ -190,8 +213,11 @@ class CoursePlugin(Star):
                 controller.stop()
                 return
 
-            controller.keep(timeout=120, reset_timeout=True)
+            controller.keep(timeout=wait_seconds, reset_timeout=True)
 
+        waiter = session_waiter(
+            timeout=wait_seconds, record_history_chains=False
+        )(waiter)
         try:
             await waiter(event)
         except TimeoutError:
@@ -226,14 +252,14 @@ class CoursePlugin(Star):
             yield event.plain_result("你还没有绑定课表。请先使用 /绑定课表")
             return
 
+        wait_seconds = self._cfg_int("bind_wait_seconds", 120, 10)
         yield event.plain_result(
             "请回复以下格式设置每日推送：\n"
             "开启 HH:MM （例如：开启 07:00）\n"
             '或回复"关闭"禁用每日推送\n'
-            '120秒内有效，发送"退出"可取消。'
+            f'{wait_seconds}秒内有效，发送"退出"可取消。'
         )
 
-        @session_waiter(timeout=120, record_history_chains=False)
         async def waiter(controller: SessionController, evt: AstrMessageEvent):
             text = (evt.message_str or "").strip()
             if text == "退出":
@@ -255,7 +281,7 @@ class CoursePlugin(Star):
             if len(parts) == 2 and parts[0] == "开启":
                 time_str = parts[1]
                 if not _is_valid_time_format(time_str):
-                    controller.keep(timeout=120, reset_timeout=True)
+                    controller.keep(timeout=wait_seconds, reset_timeout=True)
                     return
 
                 bindings = self._storage.load_bindings()
@@ -273,8 +299,11 @@ class CoursePlugin(Star):
                 controller.stop()
                 return
 
-            controller.keep(timeout=120, reset_timeout=True)
+            controller.keep(timeout=wait_seconds, reset_timeout=True)
 
+        waiter = session_waiter(
+            timeout=wait_seconds, record_history_chains=False
+        )(waiter)
         try:
             await waiter(event)
         except TimeoutError:
@@ -290,12 +319,12 @@ class CoursePlugin(Star):
             yield event.plain_result("你还没有绑定课表。请先使用 /绑定课表")
             return
 
+        wait_seconds = self._cfg_int("bind_wait_seconds", 120, 10)
         yield event.plain_result(
             "请回复提前提醒的分钟数（例如：15 表示提前15分钟）\n"
-            '120秒内有效，发送"退出"可取消。'
+            f'{wait_seconds}秒内有效，发送"退出"可取消。'
         )
 
-        @session_waiter(timeout=120, record_history_chains=False)
         async def waiter(controller: SessionController, evt: AstrMessageEvent):
             text = (evt.message_str or "").strip()
             if text == "退出":
@@ -306,7 +335,7 @@ class CoursePlugin(Star):
             try:
                 minutes = int(text)
                 if minutes < 1 or minutes > 120:
-                    controller.keep(timeout=120, reset_timeout=True)
+                    controller.keep(timeout=wait_seconds, reset_timeout=True)
                     return
 
                 bindings = self._storage.load_bindings()
@@ -316,8 +345,11 @@ class CoursePlugin(Star):
                 await evt.send(evt.plain_result(f"已设置提前 {minutes} 分钟提醒"))
                 controller.stop()
             except ValueError:
-                controller.keep(timeout=120, reset_timeout=True)
+                controller.keep(timeout=wait_seconds, reset_timeout=True)
 
+        waiter = session_waiter(
+            timeout=wait_seconds, record_history_chains=False
+        )(waiter)
         try:
             await waiter(event)
         except TimeoutError:
@@ -428,9 +460,9 @@ class CoursePlugin(Star):
                 "title": title,
                 "subtitle": subtitle,
                 "days": days,
-                "page_width": 1280,
+                "page_width": self._cfg_int("week_render_width", 1280, 320),
             },
-            options={"quality": 100},
+            options={"quality": self._cfg_int("render_quality", 100, 1)},
         )
         yield event.image_result(url)
 
@@ -475,9 +507,9 @@ class CoursePlugin(Star):
                 "title": title,
                 "subtitle": subtitle,
                 "days": days,
-                "page_width": 1280,
+                "page_width": self._cfg_int("week_render_width", 1280, 320),
             },
-            options={"quality": 100},
+            options={"quality": self._cfg_int("render_quality", 100, 1)},
         )
         yield event.image_result(url)
 
@@ -525,9 +557,9 @@ class CoursePlugin(Star):
                 "title": title,
                 "subtitle": subtitle,
                 "courses": courses,
-                "page_width": 500,
+                "page_width": self._cfg_int("day_render_width", 500, 320),
             },
-            options={"quality": 100},
+            options={"quality": self._cfg_int("render_quality", 100, 1)},
         )
         yield event.image_result(url)
 
@@ -636,9 +668,9 @@ class CoursePlugin(Star):
                     "title": title,
                     "subtitle": subtitle,
                     "courses": courses,
-                    "page_width": 500,
+                    "page_width": self._cfg_int("day_render_width", 500, 320),
                 },
-                options={"quality": 100},
+                options={"quality": self._cfg_int("render_quality", 100, 1)},
             )
 
             session = MessageSession.from_str(binding.unified_msg_origin)
@@ -649,13 +681,14 @@ class CoursePlugin(Star):
             logger.error(f"[course] daily push failed for user {user_id}: {e}")
 
     async def _reminder_loop(self) -> None:
+        tick_seconds = self._cfg_int("reminder_tick_seconds", 60, 5)
         while not self._stop_event.is_set():
             try:
                 await self._tick_reminder()
             except Exception as e:
                 logger.error(f"[course] reminder tick failed: {e}")
             try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=60)
+                await asyncio.wait_for(self._stop_event.wait(), timeout=tick_seconds)
             except asyncio.TimeoutError:
                 pass
 
@@ -665,7 +698,8 @@ class CoursePlugin(Star):
             return
 
         now_utc = datetime.now(timezone.utc)
-        if self._cleanup_reminded(now_utc):
+        retention_days = self._cfg_int("reminded_retention_days", 30, 1)
+        if self._cleanup_reminded(now_utc, retention_days):
             # 过期清理改变了记录,同步落盘
             self._storage.save_reminded(self._reminded)
         for user_id, binding in bindings.items():
@@ -737,10 +771,10 @@ class CoursePlugin(Star):
                 job_ids.add(str(job_id))
         return job_ids
 
-    def _cleanup_reminded(self, now: datetime) -> bool:
-        """清理 30 天前的提醒记录;返回是否有变化(需同步落盘)。"""
+    def _cleanup_reminded(self, now: datetime, retention_days: int = 30) -> bool:
+        """清理过期的提醒记录;返回是否有变化(需同步落盘)。"""
         changed = False
-        cutoff = now - timedelta(days=30)
+        cutoff = now - timedelta(days=retention_days)
         for user_id in list(self._reminded.keys()):
             kept: Set[str] = set()
             for key in self._reminded[user_id]:
