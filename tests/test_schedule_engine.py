@@ -6,6 +6,7 @@ from astrbot_plugin_course.schedule_engine import (
     SHANGHAI_TZ,
     day_events,
     upcoming_within_15m,
+    week_events,
     week_start,
 )
 from astrbot_plugin_course.course_types import CourseSeries
@@ -112,3 +113,64 @@ def test_week_start():
     assert week_start(date(2026, 9, 9)) == date(2026, 9, 7)  # 周三 → 周一
     assert week_start(date(2026, 9, 7)) == date(2026, 9, 7)  # 周一 → 自身
     assert week_start(date(2026, 9, 13)) == date(2026, 9, 7)  # 周日 → 本周一
+
+
+class TestBuildRuleCache:
+    """C14:RRULE 解析结果按 (文本, DTSTART) 缓存复用。"""
+
+    def test_same_key_returns_same_object(self):
+        from astrbot_plugin_course.schedule_engine import _build_rule
+
+        dt = datetime(2026, 9, 7, 10, 40, tzinfo=SH).astimezone(UTC)
+        r1 = _build_rule("FREQ=WEEKLY;COUNT=3", dt.isoformat())
+        r2 = _build_rule("FREQ=WEEKLY;COUNT=3", dt.isoformat())
+        assert r1 is r2
+
+    def test_day_events_reuses_cached_rule(self):
+        """7 次逐日查询只解析一次规则(lru 命中)。"""
+        from astrbot_plugin_course.schedule_engine import _build_rule
+
+        _build_rule.cache_clear()
+        ss = [
+            series(datetime(2026, 9, 7, h, 0, tzinfo=SH),
+                   summary=f"课{h}", rrule="FREQ=WEEKLY;COUNT=20")
+            for h in (8, 10, 14)
+        ]
+        for i in range(7):
+            day_events(ss, date(2026, 9, 7) + timedelta(days=i), SH)
+        assert _build_rule.cache_info().misses == 3  # 3 条规则,而非 3×7
+
+
+class TestWeekEvents:
+    def test_matches_day_events(self):
+        s = series(datetime(2026, 9, 7, 10, 40, tzinfo=SH), rrule="FREQ=WEEKLY;COUNT=4")
+        week_lists = week_events([s], date(2026, 9, 7), SH)
+        assert len(week_lists) == 7
+        for i in range(7):
+            d = date(2026, 9, 7) + timedelta(days=i)
+            assert week_lists[i] == day_events([s], d, SH)
+
+    def test_empty_series(self):
+        week_lists = week_events([], date(2026, 9, 7), SH)
+        assert len(week_lists) == 7
+        assert all(day == [] for day in week_lists)
+
+    def test_single_parse_for_whole_week(self):
+        """整周一次展开:3 条规则只解析 3 次(逐天将解析 21 次)。"""
+        from astrbot_plugin_course.schedule_engine import _build_rule
+
+        _build_rule.cache_clear()
+        ss = [
+            series(datetime(2026, 9, 7, h, 0, tzinfo=SH),
+                   summary=f"课{h}", rrule="FREQ=WEEKLY;COUNT=20")
+            for h in (8, 10, 14)
+        ]
+        week_lists = week_events(ss, date(2026, 9, 7), SH)
+        assert _build_rule.cache_info().misses == 3
+        assert sum(len(day) for day in week_lists) == 3
+
+    def test_event_on_sunday_belong_to_that_week(self):
+        s = series(datetime(2026, 9, 13, 10, 0, tzinfo=SH))  # 周日
+        week_lists = week_events([s], date(2026, 9, 7), SH)
+        assert len(week_lists[6]) == 1  # 周日位置
+

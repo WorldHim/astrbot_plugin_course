@@ -18,7 +18,7 @@ from astrbot.core.utils.session_waiter import SessionController, session_waiter
 from .course_types import CourseEvent, CourseSeries, SHANGHAI_TZ, UserBinding
 from .ics_parser import IcsParser
 from .render_templates import DAY_TMPL, WEEK_TMPL
-from .schedule_engine import day_events, upcoming_within_15m, week_start
+from .schedule_engine import day_events, upcoming_within_15m, week_events, week_start
 from .storage import CourseStorage
 
 
@@ -442,11 +442,12 @@ class CoursePlugin(Star):
         now = datetime.now(user_tz)
         today_date = now.date()
         start = week_start(today_date)
+        week_lists = week_events(series, start, user_tz)
         days = []
         labels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
         for i in range(7):
             d = start + timedelta(days=i)
-            day_list = day_events(series, d, user_tz)
+            day_list = week_lists[i]
             days.append(
                 {
                     "label": labels[i],
@@ -493,11 +494,12 @@ class CoursePlugin(Star):
         now = datetime.now(user_tz)
         today_date = now.date()
         start = week_start(today_date) + timedelta(days=7)
+        week_lists = week_events(series, start, user_tz)
         days = []
         labels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
         for i in range(7):
             d = start + timedelta(days=i)
-            day_list = day_events(series, d, user_tz)
+            day_list = week_lists[i]
             days.append(
                 {
                     "label": labels[i],
