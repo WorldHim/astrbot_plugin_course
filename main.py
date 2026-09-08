@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Dict, Optional, Set
 
 from astrbot.api import logger
@@ -129,18 +131,22 @@ class CoursePlugin(Star):
 
             ics_path = self._storage.get_ics_path(user_id)
 
-            file_url = await _try_get_file_url(evt)
-            if file_url:
-                await evt.send(evt.plain_result("正在下载课表..."))
+            file_source = await _try_get_file_source(evt)
+            if file_source is not None:
+                kind, source = file_source
+                await evt.send(evt.plain_result("正在接收课表..."))
                 try:
-                    await download_file(file_url, str(ics_path))
+                    if kind == "url":
+                        await download_file(source, str(ics_path))
+                    else:
+                        shutil.copyfile(source, str(ics_path))
                 except Exception as e:
-                    logger.error(f"[course] download ics failed: {e}")
-                    await evt.send(evt.plain_result("文件下载失败，请重试。"))
+                    logger.error(f"[course] save ics failed ({kind}): {e}")
+                    await evt.send(evt.plain_result("文件保存失败，请重试。"))
                     controller.stop()
                     return
 
-                # 下载后立即校验，避免把无效文件绑定成课表
+                # 保存后立即校验，避免把无效文件绑定成课表
                 try:
                     ics_size = ics_path.stat().st_size
                 except OSError:
@@ -716,23 +722,51 @@ def _reminder_start_from_key(key: str) -> Optional[datetime]:
     return dt.astimezone(SHANGHAI_TZ)
 
 
-async def _try_get_file_url(event: AstrMessageEvent) -> Optional[str]:
+async def _try_get_file_source(event: AstrMessageEvent) -> Optional[tuple[str, str]]:
+    """从消息中提取用户发送的课表文件。
+
+    返回 ("url", http_url) 或 ("local", 本地路径);未找到返回 None。
+    兼容多种平台适配器行为:get_file() 返回协程或同步值、get_file 不支持
+    allow_return_url 参数、组件上只有本地路径属性(file/path)等。
+    """
     try:
         messages = event.get_messages()
-        for m in messages:
-            if hasattr(m, "type") and getattr(m, "type") == "File":
-                get_file = getattr(m, "get_file", None)
-                if not callable(get_file):
-                    continue
-                file_path_obj = get_file(allow_return_url=True)
-                if not asyncio.iscoroutine(file_path_obj):
-                    continue
-                file_path = await file_path_obj
-                if isinstance(file_path, str) and file_path.startswith("http"):
-                    return file_path
-        return None
     except Exception:
         return None
+
+    for m in messages:
+        try:
+            if not (hasattr(m, "type") and getattr(m, "type") == "File"):
+                continue
+
+            candidate = None
+            get_file = getattr(m, "get_file", None)
+            if callable(get_file):
+                try:
+                    result = get_file(allow_return_url=True)
+                except TypeError:
+                    # 该适配器的 get_file 不接受 allow_return_url 参数
+                    result = get_file()
+                if asyncio.iscoroutine(result):
+                    result = await result
+                candidate = result
+
+            if candidate is None:
+                # 兜底:部分适配器直接在组件上挂文件路径属性
+                candidate = getattr(m, "file", None) or getattr(m, "path", None)
+
+            if not isinstance(candidate, str) or not candidate:
+                continue
+            if candidate.startswith("http"):
+                return ("url", candidate)
+            local = Path(candidate)
+            if local.is_file():
+                return ("local", str(local))
+        except Exception as e:
+            logger.debug(f"[course] extract file component failed: {e}")
+            continue
+
+    return None
 
 
 def _is_valid_time_format(time_str: str) -> bool:
