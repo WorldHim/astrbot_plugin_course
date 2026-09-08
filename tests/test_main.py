@@ -811,3 +811,127 @@ class TestStudyRank:
         assert data["rows"][0]["total"] == "44 小时 20 分"
         assert "天" not in data["rows"][0]["total"]
 
+
+class TestAtQuery:
+    """查询命令支持命令后 at 群友,查看 TA 的课表。"""
+
+    @staticmethod
+    def _binding(uid, nickname):
+        b = make_binding(uid)
+        b.nickname = nickname
+        return b
+
+    @staticmethod
+    def _today_courses():
+        from datetime import time as dt_time
+
+        today = datetime.now(SHANGHAI_TZ).date()
+        return [
+            CourseSeries(
+                summary="高等数学",
+                dtstart=datetime.combine(today, dt_time(9, 0), tzinfo=SHANGHAI_TZ),
+                duration=timedelta(minutes=95),
+                location="明理楼302",
+            )
+        ]
+
+    def test_extract_at_target(self, plugin):
+        assert plugin._extract_at_target(FakeEvent("x", at="u1")) == "u1"
+        assert plugin._extract_at_target(FakeEvent("x")) is None
+        assert plugin._extract_at_target(FakeEvent("x", at="all")) is None  # @全体不算
+
+    def test_at_other_shows_their_day_schedule(self, plugin):
+        plugin._storage.save_bindings(
+            {"u1": self._binding("u1", "Alice"), "u2": self._binding("u2", "Bob")}
+        )
+        # Alice 有课,Bob 没有
+        plugin._load_series = (
+            lambda b: self._today_courses() if b.user_id == "u1" else []
+        )
+        captured = []
+
+        async def fake_render(template, data, options=None):
+            captured.append(data)
+            return "http://fake/at_day.png"
+
+        plugin.html_render = fake_render
+
+        async def run():
+            return [r async for r in plugin.today(FakeEvent("x", at="u1"))]
+
+        results = asyncio.run(run())
+        assert results == [("image", "http://fake/at_day.png")]
+        # 展示的是被 at 的 Alice 的课表(副标题带她的昵称)
+        assert "Alice" in captured[0]["subtitle"]
+        assert "Bob" not in captured[0]["subtitle"]
+
+    def test_at_unbound_user_hints(self, plugin):
+        plugin._storage.save_bindings({"u2": self._binding("u2", "Bob")})
+
+        async def run():
+            return [r async for r in plugin.today(FakeEvent("x", at="ghost"))]
+
+        results = asyncio.run(run())
+        assert results == ["TA 还没有绑定课表。"]
+
+    def test_at_all_falls_back_to_self(self, plugin):
+        """@全体成员不算 at 他人:退回查询自己的课表。"""
+        plugin._storage.save_bindings({"u1": self._binding("u1", "Alice")})
+
+        async def run():
+            return [r async for r in plugin.today(FakeEvent("x", at="all"))]
+
+        results = asyncio.run(run())
+        assert results == ["你还没有绑定课表。请先使用 /绑定课表"]
+
+    def test_no_at_queries_self(self, plugin):
+        plugin._storage.save_bindings({"u1": self._binding("u1", "Alice")})
+        courses = self._today_courses()
+        plugin._load_series = lambda b: courses if b.user_id == "u1" else []
+        captured = []
+
+        async def fake_render(template, data, options=None):
+            captured.append(data)
+            return "http://fake/self_day.png"
+
+        plugin.html_render = fake_render
+
+        async def run():
+            return [r async for r in plugin.today(FakeEvent("u1"))]
+
+        results = asyncio.run(run())
+        assert results == [("image", "http://fake/self_day.png")]
+        assert "Alice" in captured[0]["subtitle"]  # 查自己
+
+    def test_week_supports_at_other(self, plugin):
+        plugin._storage.save_bindings(
+            {"u1": self._binding("u1", "Alice"), "u2": self._binding("u2", "Bob")}
+        )
+        plugin._load_series = (
+            lambda b: self._today_courses() if b.user_id == "u1" else []
+        )
+        captured = []
+
+        async def fake_render(template, data, options=None):
+            captured.append(data)
+            return "http://fake/at_week.png"
+
+        plugin.html_render = fake_render
+
+        async def run():
+            return [r async for r in plugin.week(FakeEvent("x", at="u1"))]
+
+        results = asyncio.run(run())
+        assert results == [("image", "http://fake/at_week.png")]
+        assert "Alice" in captured[0]["subtitle"]
+
+    def test_at_other_with_broken_series_hints_rebind(self, plugin):
+        plugin._storage.save_bindings({"u1": self._binding("u1", "Alice")})
+        plugin._load_series = lambda b: None
+
+        async def run():
+            return [r async for r in plugin.today(FakeEvent("x", at="u1"))]
+
+        results = asyncio.run(run())
+        assert "课表文件读取或解析失败" in results[0]
+

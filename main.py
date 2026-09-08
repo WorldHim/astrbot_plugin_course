@@ -11,7 +11,7 @@ from typing import Dict, Optional, Sequence, Set
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-from astrbot.api.message_components import Image
+from astrbot.api.message_components import At, Image
 from astrbot.api.star import Context, Star, register
 from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.utils.io import download_file
@@ -496,10 +496,13 @@ class CoursePlugin(Star):
 
     @filter.command("本周课表")
     async def week(self, event: AstrMessageEvent):
-        user_id = str(event.get_sender_id())
-        binding = self._storage.get_binding(user_id)
+        binding, is_other = self._resolve_view_binding(event)
         if not binding:
-            yield event.plain_result("你还没有绑定课表。请先使用 /绑定课表")
+            yield event.plain_result(
+                "TA 还没有绑定课表。"
+                if is_other
+                else "你还没有绑定课表。请先使用 /绑定课表"
+            )
             return
 
         series = self._load_series(binding)
@@ -751,10 +754,13 @@ class CoursePlugin(Star):
 
     @filter.command("下周课表")
     async def next_week(self, event: AstrMessageEvent):
-        user_id = str(event.get_sender_id())
-        binding = self._storage.get_binding(user_id)
+        binding, is_other = self._resolve_view_binding(event)
         if not binding:
-            yield event.plain_result("你还没有绑定课表。请先使用 /绑定课表")
+            yield event.plain_result(
+                "TA 还没有绑定课表。"
+                if is_other
+                else "你还没有绑定课表。请先使用 /绑定课表"
+            )
             return
 
         series = self._load_series(binding)
@@ -856,11 +862,34 @@ class CoursePlugin(Star):
             self._render_cache[cache_key] = (now_ts + cache_minutes * 60, url)
         return url
 
+    @staticmethod
+    def _extract_at_target(event: AstrMessageEvent) -> Optional[str]:
+        """从消息中提取被 @ 的用户 ID;没有 at(@全体除外)返回 None。"""
+        for comp in event.message_obj.message:
+            if isinstance(comp, At) and str(comp.qq) != "all":
+                return str(comp.qq)
+        return None
+
+    def _resolve_view_binding(self, event: AstrMessageEvent):
+        """解析课表查询目标:命令后 at 了群友则查 TA 的课表。
+
+        返回 (binding, is_other)。binding 为 None 时:
+        is_other=False 表示自己未绑定,is_other=True 表示对方未绑定,
+        调用方据此给出对应的提示文案。
+        """
+        target_id = self._extract_at_target(event)
+        if target_id is None:
+            return self._storage.get_binding(str(event.get_sender_id())), False
+        return self._storage.get_binding(target_id), True
+
     async def _send_day_schedule(self, event: AstrMessageEvent, *, day_offset: int):
-        user_id = str(event.get_sender_id())
-        binding = self._storage.get_binding(user_id)
+        binding, is_other = self._resolve_view_binding(event)
         if not binding:
-            yield event.plain_result("你还没有绑定课表。请先使用 /绑定课表")
+            yield event.plain_result(
+                "TA 还没有绑定课表。"
+                if is_other
+                else "你还没有绑定课表。请先使用 /绑定课表"
+            )
             return
 
         series = self._load_series(binding)

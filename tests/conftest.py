@@ -57,7 +57,13 @@ def _install_astrbot_stubs():
         def fromURL(u):
             return _Image(u)
 
+    class _At:
+        def __init__(self, qq=""):
+            self.qq = qq
+            self.type = "At"
+
     fake_components.Image = _Image
+    fake_components.At = _At
 
     fake_star_mod = types.ModuleType("astrbot.api.star")
 
@@ -165,9 +171,16 @@ class FakeContext:
 
 
 class FakeEvent:
-    def __init__(self, uid, unified_msg_origin=None):
+    def __init__(self, uid, unified_msg_origin=None, at=None):
         self._uid = uid
         self.message_str = ""
+        # at: 被回复/at 的用户 ID(模拟命令后 at 群友);None 表示消息里没有 at
+        if at is not None:
+            _At = sys.modules["astrbot.api.message_components"].At
+            message = [_At(qq=at)]
+        else:
+            message = []
+        self.message_obj = types.SimpleNamespace(message=message)
         self.unified_msg_origin = unified_msg_origin or f"test:{uid}"
 
     def get_sender_id(self):
