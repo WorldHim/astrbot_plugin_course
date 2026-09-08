@@ -19,6 +19,9 @@ from .render_templates import DAY_TMPL, WEEK_TMPL
 from .schedule_engine import day_events, upcoming_within_15m, week_start
 from .storage import CourseStorage
 
+# 绑定课表时允许的 ics 文件大小上限(ics 课表通常只有几 KB~几百 KB)
+_MAX_ICS_BYTES = 5 * 1024 * 1024
+
 
 @register(
     "astrbot_plugin_course",
@@ -131,18 +134,54 @@ class CoursePlugin(Star):
                 await evt.send(evt.plain_result("正在下载课表..."))
                 try:
                     await download_file(file_url, str(ics_path))
-                    self._parser.clear_cache(str(ics_path))
-                    self._storage.upsert_binding(
-                        user_id=user_id,
-                        unified_msg_origin=evt.unified_msg_origin,
-                        nickname=nickname,
-                    )
-                    await evt.send(evt.plain_result("绑定成功。"))
-                    controller.stop()
                 except Exception as e:
                     logger.error(f"[course] download ics failed: {e}")
                     await evt.send(evt.plain_result("文件下载失败，请重试。"))
                     controller.stop()
+                    return
+
+                # 下载后立即校验，避免把无效文件绑定成课表
+                try:
+                    ics_size = ics_path.stat().st_size
+                except OSError:
+                    ics_size = 0
+                if ics_size <= 0 or ics_size > _MAX_ICS_BYTES:
+                    ics_path.unlink(missing_ok=True)
+                    await evt.send(
+                        evt.plain_result("收到的文件不是有效的课表，绑定失败，请重新上传。")
+                    )
+                    controller.stop()
+                    return
+
+                parsed = self._parser.parse_ics_file(str(ics_path))
+                if parsed is None:
+                    ics_path.unlink(missing_ok=True)
+                    await evt.send(
+                        evt.plain_result(
+                            "课表解析失败，请确认上传的是 .ics 课表文件后重新发送。"
+                        )
+                    )
+                    controller.stop()
+                    return
+                if not parsed:
+                    ics_path.unlink(missing_ok=True)
+                    await evt.send(
+                        evt.plain_result(
+                            "文件中未识别到任何课程，请确认导出的是课表 ics 后重新发送。"
+                        )
+                    )
+                    controller.stop()
+                    return
+
+                self._storage.upsert_binding(
+                    user_id=user_id,
+                    unified_msg_origin=evt.unified_msg_origin,
+                    nickname=nickname,
+                )
+                await evt.send(
+                    evt.plain_result(f"绑定成功，共识别到 {len(parsed)} 条课程安排。")
+                )
+                controller.stop()
                 return
 
             controller.keep(timeout=120, reset_timeout=True)
