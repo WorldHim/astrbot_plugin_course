@@ -4,9 +4,10 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from astrbot_plugin_course.course_types import CourseEvent
+from astrbot_plugin_course.course_types import CourseEvent, CourseSeries, SHANGHAI_TZ
 from astrbot_plugin_course.main import (
     PLUGIN_VERSION,
+    _SenderSessionFilter,
     _day_text_fallback,
     _event_view,
     _help_render_data,
@@ -15,7 +16,7 @@ from astrbot_plugin_course.main import (
     _resolve_timezone,
     _week_text_fallback,
 )
-from conftest import FakeEvent
+from conftest import FakeEvent, make_binding
 
 
 def _event(minutes_offset: int = 10, **kwargs) -> CourseEvent:
@@ -239,7 +240,6 @@ class TestHelpText:
 
 class TestHelpCommand:
     """帮助指令:图片渲染(同版本走缓存)与文字兜底。"""
-
     def test_render_data_structure(self):
         data = _help_render_data()
         cmds = [c["cmd"] for s in data["sections"] for c in s["commands"]]
@@ -279,4 +279,93 @@ class TestHelpCommand:
         assert isinstance(results[0], str)
         assert "/绑定课表" in results[0]  # 文字兜底包含指令列表
         assert "wikilake" in results[1] and results[1] == _HELP_TOOL_LINK  # 链接单独成条(可点击)
+
+
+class TestReminderToggle:
+    """开课提醒默认关闭:未开启的用户在提醒循环中被完全跳过。"""
+
+    @staticmethod
+    def _binding_with_upcoming_course(uid="u", minutes_ahead=10, *, enabled: bool):
+        b = make_binding(uid, 15)
+        b.enable_reminder = enabled
+        return b, [
+            CourseSeries(
+                summary="测试课",
+                dtstart=datetime.now(SHANGHAI_TZ) + timedelta(minutes=minutes_ahead),
+                duration=timedelta(minutes=45),
+                rrule_text="FREQ=DAILY",
+            )
+        ]
+
+    def test_remind_user_skipped_when_disabled(self, plugin):
+        from datetime import timezone
+
+        binding, series = self._binding_with_upcoming_course("u", enabled=False)
+        plugin._load_series = lambda b: series
+        sent = []
+
+        async def fake_send(session, chain):
+            sent.append(chain)
+
+        plugin._context.send_message = fake_send
+
+        result = asyncio.run(
+            plugin._remind_user("u", binding, datetime.now(timezone.utc))
+        )
+        assert result is False  # 未开启提醒:直接跳过,不发送
+        assert sent == []
+
+    def test_remind_user_sends_when_enabled(self, plugin):
+        from datetime import timezone
+
+        binding, series = self._binding_with_upcoming_course("u", enabled=True)
+        plugin._load_series = lambda b: series
+        sent = []
+
+        async def fake_send(session, chain):
+            sent.append(chain)
+
+        plugin._context.send_message = fake_send
+
+        result = asyncio.run(
+            plugin._remind_user("u", binding, datetime.now(timezone.utc))
+        )
+        assert result is True
+        assert len(sent) == 1
+        assert "测试课" in sent[0].items[0]
+
+
+class TestSenderSessionFilter:
+    """群聊支持:会话等待按 (会话, 发送者) 界定,他人消息不干扰。"""
+
+    @staticmethod
+    def _event(origin: str, uid: str):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            unified_msg_origin=origin, get_sender_id=lambda: uid
+        )
+
+    def test_same_group_same_user_is_one_session(self):
+        f = _SenderSessionFilter()
+        a = f.filter(self._event("aiocqhttp:GroupMessage:123", "u1"))
+        assert a == f.filter(self._event("aiocqhttp:GroupMessage:123", "u1"))
+
+    def test_same_group_different_users_differ(self):
+        f = _SenderSessionFilter()
+        a = f.filter(self._event("aiocqhttp:GroupMessage:123", "u1"))
+        b = f.filter(self._event("aiocqhttp:GroupMessage:123", "u2"))
+        assert a != b  # 群聊中他人消息不会串入当前用户的会话
+
+    def test_different_groups_differ(self):
+        f = _SenderSessionFilter()
+        a = f.filter(self._event("aiocqhttp:GroupMessage:123", "u1"))
+        b = f.filter(self._event("aiocqhttp:GroupMessage:456", "u1"))
+        assert a != b  # 不同群互相隔离
+
+    def test_private_chat_keeps_working(self):
+        f = _SenderSessionFilter()
+        a = f.filter(self._event("aiocqhttp:FriendMessage:123", "u1"))
+        b = f.filter(self._event("aiocqhttp:GroupMessage:123", "u1"))
+        assert a != b  # 私聊与群聊隔离
 

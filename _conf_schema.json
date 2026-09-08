@@ -16,6 +16,12 @@
     "type": "int",
     "default": 15
   },
+  "default_reminder_enabled": {
+    "description": "新绑定用户是否默认开启开课提醒",
+    "hint": "默认关闭;用户可通过 /设置提醒时间 自行开启(回复分钟数)或关闭(回复\"关闭\")",
+    "type": "bool",
+    "default": false
+  },
   "default_push_time": {
     "description": "新绑定用户的默认每日推送时间(HH:MM)",
     "type": "string",

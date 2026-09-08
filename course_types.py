@@ -68,6 +68,7 @@ class UserBinding:
     # User-configurable options
     enable_daily_push: bool = False
     daily_push_time: str = "07:00"  # Format: HH:MM
+    enable_reminder: bool = False  # 开课提醒开关(默认关闭,需用 /设置提醒时间 开启)
     reminder_advance_minutes: int = 15
     daily_push_job_id: str = ""
     timezone_name: str = "Asia/Shanghai"  # 用户所在时区(IANA 名称)

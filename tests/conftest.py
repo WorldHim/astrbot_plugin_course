@@ -103,13 +103,25 @@ def _install_astrbot_stubs():
     class _SessionController:
         pass
 
+    class _SessionFilter:
+        """与 astrbot 对应的会话过滤器基类 stub。"""
+
+        def filter(self, event):
+            return event.unified_msg_origin
+
     def _session_waiter(timeout=None, record_history_chains=False):
         def deco(f):
-            return f
+            async def wrapper(ev, session_filter=None, *a, **k):
+                return await f(ev, session_filter, *a, **k)
+
+            return wrapper
+
+        return deco
 
         return deco
 
     fake_waiter.SessionController = _SessionController
+    fake_waiter.SessionFilter = _SessionFilter
     fake_waiter.session_waiter = _session_waiter
 
     sys.modules["astrbot"] = fake_astrbot

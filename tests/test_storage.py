@@ -14,6 +14,30 @@ class TestBindings:
         assert loaded["u1"].reminder_advance_minutes == 30
         assert loaded["u1"].timezone_name == "Asia/Shanghai"
 
+    def test_reminder_toggle_roundtrip(self, storage):
+        b = make_binding("u1", 15)
+        b.enable_reminder = True
+        storage.save_bindings({"u1": b})
+        assert storage.load_bindings()["u1"].enable_reminder is True
+        b2 = make_binding("u2", 15)  # 默认 enable_reminder=False
+        storage.save_bindings({"u2": b2})
+        assert storage.load_bindings()["u2"].enable_reminder is False
+
+    def test_legacy_binding_without_enable_reminder(self, storage):
+        # 旧版数据无 enable_reminder 字段 → 默认 False(开课提醒默认关闭)
+        payload = {
+            "version": 1,
+            "bindings": {
+                "u": {
+                    "user_id": "u", "unified_msg_origin": "t", "nickname": "",
+                    "ics_file": "a", "updated_at_ts": 0.0,
+                    "reminder_advance_minutes": 15,
+                }
+            },
+        }
+        storage._bindings_file.write_text(json.dumps(payload), encoding="utf-8")
+        assert storage.load_bindings()["u"].enable_reminder is False
+
     def test_second_save_creates_bak_with_previous_version(self, storage):
         storage.save_bindings({"u1": make_binding("u1", 15)})
         storage.save_bindings({"u1": make_binding("u1", 30), "u2": make_binding("u2")})
@@ -95,10 +119,23 @@ class TestBindings:
         assert b.daily_push_time == "08:30"
         assert b.timezone_name == "America/New_York"
 
+    def test_upsert_new_user_auto_features_disabled_by_default(self, storage):
+        b = storage.upsert_binding(user_id="u", unified_msg_origin="t", nickname="n")
+        assert b.enable_reminder is False  # 开课提醒默认关闭
+        assert b.enable_daily_push is False  # 每日推送默认关闭
+
+    def test_upsert_new_user_reminder_enabled_via_config(self, storage):
+        b = storage.upsert_binding(
+            user_id="u", unified_msg_origin="t", nickname="n",
+            default_reminder_enabled=True,
+        )
+        assert b.enable_reminder is True
+
     def test_upsert_existing_keeps_custom(self, storage):
         b = storage.upsert_binding(user_id="u", unified_msg_origin="t", nickname="n")
         b.reminder_advance_minutes = 45
         b.timezone_name = "Europe/London"
+        b.enable_reminder = True
         storage.save_bindings({"u": b})
         b2 = storage.upsert_binding(
             user_id="u", unified_msg_origin="t", nickname="n",
@@ -107,6 +144,7 @@ class TestBindings:
         )
         assert b2.reminder_advance_minutes == 45
         assert b2.timezone_name == "Europe/London"
+        assert b2.enable_reminder is True  # 已开启状态不因重新绑定丢失
 
     def test_delete_binding_removes_file(self, storage):
         b = storage.upsert_binding(user_id="u", unified_msg_origin="t", nickname="n")

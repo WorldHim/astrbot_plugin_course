@@ -15,13 +15,30 @@ from astrbot.api.message_components import Image
 from astrbot.api.star import Context, Star, register
 from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.utils.io import download_file
-from astrbot.core.utils.session_waiter import SessionController, session_waiter
+from astrbot.core.utils.session_waiter import (
+    SessionController,
+    SessionFilter,
+    session_waiter,
+)
 
 from .course_types import CourseEvent, CourseSeries, SHANGHAI_TZ, UserBinding
 from .ics_parser import IcsParser
 from .render_templates import DAY_TMPL, HELP_TMPL, WEEK_TMPL
 from .schedule_engine import day_events, upcoming_within_15m, week_events, week_start
 from .storage import CourseStorage
+
+
+class _SenderSessionFilter(SessionFilter):
+    """按 (会话, 发送者) 界定多轮会话。
+
+    默认的 DefaultSessionFilter 只按 unified_msg_origin(群聊=群 ID)界定,
+    群聊中会话等待期间【其他成员】的消息也会被当作当前用户的输入——
+    例如 A 绑定课表时,群里 B 发的文件会被绑到 A 名下。加上发送者 ID
+    后,只有发起指令的用户本人的后续消息才会进入会话。
+    """
+
+    def filter(self, event: AstrMessageEvent) -> str:
+        return f"{event.unified_msg_origin}|{event.get_sender_id()}"
 
 # 插件版本(@register 与帮助图片共用;metadata.yaml 的 version 需保持一致)
 PLUGIN_VERSION = "2.1.1"
@@ -212,6 +229,9 @@ class CoursePlugin(Star):
                     user_id=user_id,
                     unified_msg_origin=evt.unified_msg_origin,
                     nickname=nickname,
+                    default_reminder_enabled=bool(
+                        self._cfg("default_reminder_enabled", False)
+                    ),
                     default_reminder_minutes=self._cfg_int(
                         "default_reminder_minutes", 15, 1
                     ),
@@ -230,7 +250,7 @@ class CoursePlugin(Star):
             timeout=wait_seconds, record_history_chains=False
         )(waiter)
         try:
-            await waiter(event)
+            await waiter(event, session_filter=_SenderSessionFilter())
         except TimeoutError:
             yield event.plain_result("绑定超时。")
         finally:
@@ -317,7 +337,7 @@ class CoursePlugin(Star):
             timeout=wait_seconds, record_history_chains=False
         )(waiter)
         try:
-            await waiter(event)
+            await waiter(event, session_filter=_SenderSessionFilter())
         except TimeoutError:
             yield event.plain_result("设置超时。")
         finally:
@@ -333,14 +353,23 @@ class CoursePlugin(Star):
 
         wait_seconds = self._cfg_int("bind_wait_seconds", 120, 10)
         yield event.plain_result(
-            "请回复提前提醒的分钟数（例如：15 表示提前15分钟）\n"
-            f'{wait_seconds}秒内有效，发送"退出"可取消。'
+            "请回复提前提醒的分钟数（例如：15 表示提前15分钟，即可开启提醒）\n"
+            f'回复"关闭"可关闭开课提醒。{wait_seconds}秒内有效，发送"退出"可取消。'
         )
 
         async def waiter(controller: SessionController, evt: AstrMessageEvent):
             text = (evt.message_str or "").strip()
             if text == "退出":
                 await evt.send(evt.plain_result("已取消设置。"))
+                controller.stop()
+                return
+
+            if text == "关闭":
+                bindings = self._storage.load_bindings()
+                if user_id in bindings:
+                    bindings[user_id].enable_reminder = False
+                    self._storage.save_bindings(bindings)
+                await evt.send(evt.plain_result("已关闭开课提醒。"))
                 controller.stop()
                 return
 
@@ -352,9 +381,12 @@ class CoursePlugin(Star):
 
                 bindings = self._storage.load_bindings()
                 if user_id in bindings:
+                    bindings[user_id].enable_reminder = True
                     bindings[user_id].reminder_advance_minutes = minutes
                     self._storage.save_bindings(bindings)
-                await evt.send(evt.plain_result(f"已设置提前 {minutes} 分钟提醒"))
+                await evt.send(
+                    evt.plain_result(f"已开启开课提醒：提前 {minutes} 分钟")
+                )
                 controller.stop()
             except ValueError:
                 controller.keep(timeout=wait_seconds, reset_timeout=True)
@@ -363,7 +395,7 @@ class CoursePlugin(Star):
             timeout=wait_seconds, record_history_chains=False
         )(waiter)
         try:
-            await waiter(event)
+            await waiter(event, session_filter=_SenderSessionFilter())
         except TimeoutError:
             yield event.plain_result("设置超时。")
         finally:
@@ -378,12 +410,17 @@ class CoursePlugin(Star):
             return
 
         push_status = "已开启" if binding.enable_daily_push else "已关闭"
+        reminder_status = (
+            f"已开启（提前 {binding.reminder_advance_minutes} 分钟）"
+            if binding.enable_reminder
+            else "已关闭"
+        )
         settings_text = (
             f"当前设置：\n"
             f"时区：{binding.timezone_name}\n"
             f"每日推送：{push_status}\n"
             f"推送时间：{binding.daily_push_time}\n"
-            f"提前提醒：{binding.reminder_advance_minutes} 分钟"
+            f"开课提醒：{reminder_status}"
         )
         yield event.plain_result(settings_text)
 
@@ -830,6 +867,9 @@ class CoursePlugin(Star):
     ) -> bool:
         """处理单个用户的开课提醒;返回是否有新增提醒记录(需落盘)。"""
         try:
+            if not binding.enable_reminder:
+                # 用户未开启开课提醒(默认关闭):完全跳过
+                return False
             user_tz = binding.get_timezone()
             now = now_utc.astimezone(user_tz)
             series = self._load_series(binding)

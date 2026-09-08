@@ -52,6 +52,8 @@ class CourseStorage:
                     updated_at_ts=float(item.get("updated_at_ts", 0.0)),
                     enable_daily_push=bool(item.get("enable_daily_push", False)),
                     daily_push_time=str(item.get("daily_push_time", "07:00")),
+                    # 旧版数据无该字段 → 默认 False(开课提醒默认关闭)
+                    enable_reminder=bool(item.get("enable_reminder", False)),
                     reminder_advance_minutes=int(
                         item.get("reminder_advance_minutes", 15)
                     ),
@@ -212,6 +214,7 @@ class CourseStorage:
         user_id: str,
         unified_msg_origin: str,
         nickname: str,
+        default_reminder_enabled: bool = False,
         default_reminder_minutes: int = 15,
         default_push_time: str = "07:00",
         default_timezone: str = "Asia/Shanghai",
@@ -228,6 +231,9 @@ class CourseStorage:
             updated_at_ts=time.time(),
             enable_daily_push=prev.enable_daily_push if prev else False,
             daily_push_time=prev.daily_push_time if prev else default_push_time,
+            enable_reminder=(
+                prev.enable_reminder if prev else default_reminder_enabled
+            ),
             reminder_advance_minutes=(
                 prev.reminder_advance_minutes if prev else default_reminder_minutes
             ),
