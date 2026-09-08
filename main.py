@@ -24,7 +24,7 @@ from .schedule_engine import day_events, upcoming_within_15m, week_events, week_
 from .storage import CourseStorage
 
 # 插件版本(@register 与帮助图片共用;metadata.yaml 的 version 需保持一致)
-PLUGIN_VERSION = "2.1.0"
+PLUGIN_VERSION = "2.1.1"
 
 
 @register(
