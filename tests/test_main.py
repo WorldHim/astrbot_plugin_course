@@ -1,15 +1,19 @@
 """main.py 轻量单元测试:配置读取、视图/兜底文案、时区解析、渲染缓存。"""
 import asyncio
+import hashlib
+import types
 from datetime import datetime, time as dt_time, timedelta, timezone
 
 import pytest
 
+from astrbot_plugin_course import main as course_main
 from astrbot_plugin_course.course_types import CourseEvent, CourseSeries, SHANGHAI_TZ
 from astrbot_plugin_course.help_content import TOOL_LINK, help_render_data, help_text
 from astrbot_plugin_course.main import (
     PLUGIN_VERSION,
     _SenderSessionFilter,
     _avatar_for,
+    _avatar_fingerprint_from_file,
     _avatar_from_event,
     _avatar_url,
     _day_text_fallback,
@@ -17,6 +21,8 @@ from astrbot_plugin_course.main import (
     _find_link_candidates,
     _format_rank_total,
     _group_now_text,
+    _qq_official_appid,
+    _qqapp_avatar_url,
     _resolve_timezone,
     _study_rank_text,
     _week_text_fallback,
@@ -866,6 +872,92 @@ class TestAvatarProfile:
         )
         assert b3.avatar == "https://thirdqq.qq.com/new.png"
 
+    @staticmethod
+    def _official_appid_event(uid="openid-x", app_id="888888"):
+        """模拟 qq_official:botpy 客户端链上带机器人 appid。"""
+        event = FakeEvent(uid)
+        event.message_obj.raw_message = types.SimpleNamespace(
+            _api=types.SimpleNamespace(
+                _http=types.SimpleNamespace(
+                    _token=types.SimpleNamespace(app_id=app_id)
+                )
+            ),
+            raw_data={},
+        )
+        return event
+
+    def test_official_appid_extracted_from_client_chain(self):
+        assert _qq_official_appid(self._official_appid_event()) == "888888"
+
+    def test_avatar_from_event_uses_qqapp_for_official(self):
+        # 官方群聊 payload 不带 avatar → 用 qqapp 头像服务(appid+openid)出图
+        assert _avatar_from_event(self._official_appid_event()) == (
+            "https://q.qlogo.cn/qqapp/888888/openid-x/640"
+        )
+
+    def test_official_payload_avatar_takes_priority(self):
+        # 官方真下发 author.avatar 时优先于 qqapp 拼接
+        event = self._official_appid_event()
+        event.message_obj.raw_message.raw_data = {
+            "author": {"avatar": "https://cdn.qq.com/real.png"}
+        }
+        assert _avatar_from_event(event) == "https://cdn.qq.com/real.png"
+
+    def test_avatar_from_event_empty_without_appid_and_digits(self):
+        # 非 OneBot 非 qq_official(如 webchat)→ 空,模板 onerror 隐藏
+        assert _avatar_from_event(FakeEvent("me")) == ""
+
+    def test_avatar_fingerprint_stable_and_discriminating(self, tmp_path):
+        from PIL import Image
+
+        def gradient(size, offset):
+            im = Image.new("L", (size, size))
+            im.putdata(
+                [((x * 3 + y * 3 + offset) % 256) for y in range(size) for x in range(size)]
+            )
+            return im
+
+        p_same = tmp_path / "same.png"
+        gradient(64, 0).save(p_same)
+        p_other = tmp_path / "other.png"
+        gradient(64, 40).save(p_other)
+
+        fp1 = _avatar_fingerprint_from_file(str(p_same))
+        fp2 = _avatar_fingerprint_from_file(str(p_same))
+        fp3 = _avatar_fingerprint_from_file(str(p_other))
+
+        assert fp1 == fp2  # 同图指纹稳定
+        assert fp1 != fp3  # 不同图指纹可区分
+        assert len(fp1) == 16  # 64bit 十六进制
+
+    def test_avatar_fingerprint_downloads_and_caches(self, plugin, monkeypatch):
+        from PIL import Image
+
+        calls = []
+
+        async def fake_download(url, path):
+            calls.append(url)
+            Image.new("L", (32, 32), 100).save(path, "PNG")  # 无扩展名需显式格式
+
+        monkeypatch.setattr(course_main, "download_file", fake_download)
+        course_main._AVATAR_FP_CACHE.clear()
+
+        fp1 = asyncio.run(course_main._avatar_fingerprint("https://x/a.png"))
+        fp2 = asyncio.run(course_main._avatar_fingerprint("https://x/a.png"))
+
+        assert fp1 == fp2 and fp1
+        assert calls == ["https://x/a.png"]  # 第二次命中缓存不再下载
+
+    def test_avatar_fingerprint_download_failure_returns_none(self, plugin, monkeypatch):
+        async def bad_download(url, path):
+            raise RuntimeError("offline")
+
+        monkeypatch.setattr(course_main, "download_file", bad_download)
+        course_main._AVATAR_FP_CACHE.clear()
+
+        assert asyncio.run(course_main._avatar_fingerprint("https://x/bad.png")) is None
+        assert "https://x/bad.png" in course_main._AVATAR_FP_CACHE  # 失败也缓存防重试
+
 
 class TestLinkBinding:
     """/关联课表:昵称+头像匹配候选、确认交互前置分支与复用逻辑。"""
@@ -922,9 +1014,13 @@ class TestLinkBinding:
         assert strong == []
         assert weak == []
 
-    def test_candidates_require_nickname_and_avatar(self):
+    def test_candidates_require_nickname(self):
+        # 昵称是硬条件;头像拿不到时不拒绝,昵称匹配落弱候选
         assert _find_link_candidates({}, "me", "", "http://a") == ([], [])
-        assert _find_link_candidates({}, "me", "Alice", "") == ([], [])
+        b = self._b("a", "Alice")
+        strong, weak = _find_link_candidates({"a": b}, "me", "Alice", "")
+        assert strong == []
+        assert [x.user_id for x in weak] == ["a"]
 
     # ---- link 命令前置分支 ----
 
@@ -938,11 +1034,80 @@ class TestLinkBinding:
         assert "请直接使用 /绑定课表" in results[0]
 
     def test_link_hints_when_nickname_missing(self, plugin):
-        # 官方未下发昵称 → 无法可靠匹配
+        # 官方未下发昵称且未手动指定 → 无法匹配
         event = self._official_event()
         event.get_sender_name = lambda: ""
         results = self._run(plugin, event)
-        assert "无法匹配" in results[0]
+        assert "无法获取你的昵称" in results[0]
+        assert "关联课表 昵称" in results[0]  # 引导手动指定
+
+    def test_link_accepts_manual_nickname(self, plugin):
+        """/关联课表 昵称:官方下发了头像但昵称缺失 → 手动指定 + 头像比对。"""
+        plugin._storage.save_bindings({"a": self._b("a", "Alice")})
+        event = self._official_event()
+        event.message_str = "关联课表 Alice"
+
+        results = self._run(plugin, event)
+
+        assert "找到昵称为「Alice」的已绑定课表" in results[0]
+        # 官方 avatar 与候选(qlogo)地址不同 → 弱匹配提示核实
+        assert "对方头像地址与你的不同" in results[0]
+
+    def test_link_manual_nickname_without_avatar(self, plugin):
+        """官方未下发昵称/头像时手动指定 → 仅按昵称匹配。"""
+        plugin._storage.save_bindings({"a": self._b("a", "Alice")})
+        event = FakeEvent("me")  # 无 raw_author、openid 非数字 → 头像拿不到
+        event.message_str = "关联课表 Alice"
+
+        results = self._run(plugin, event)
+
+        assert "找到昵称为「Alice」的已绑定课表" in results[0]
+        assert "仅按昵称匹配" in results[0]
+
+    def test_link_verifies_avatar_by_file_fingerprint(self, plugin, monkeypatch):
+        """跨平台 URL 必不同(qlogo vs qqapp)→ 下载文件指纹比对升级为可信。"""
+        plugin._storage.save_bindings({"1": self._b("1", "tester")})
+        event = TestAvatarProfile._official_appid_event("999")
+        event.message_str = "关联课表 tester"
+
+        async def fake_fp(url):
+            return "a" * 16  # 模拟两边头像内容一致
+
+        monkeypatch.setattr(course_main, "_avatar_fingerprint", fake_fp)
+
+        results = self._run(plugin, event)
+
+        assert "找到昵称为「tester」的已绑定课表" in results[0]
+        assert "请自行确认" not in results[0]  # 指纹一致 → 无核实提示
+
+    def test_link_keeps_weak_note_when_fingerprint_differs(self, plugin, monkeypatch):
+        plugin._storage.save_bindings({"1": self._b("1", "tester")})
+        event = TestAvatarProfile._official_appid_event("999")
+        event.message_str = "关联课表 tester"
+
+        async def fake_fp(url):
+            return hashlib.md5(url.encode()).hexdigest()  # 不同 URL 不同指纹
+
+        monkeypatch.setattr(course_main, "_avatar_fingerprint", fake_fp)
+
+        results = self._run(plugin, event)
+
+        assert "找到昵称为「tester」的已绑定课表" in results[0]
+        assert "请自行确认" in results[0]  # 指纹不一致 → 保留核实提示
+
+    def test_link_uses_onebot_api_when_sender_name_missing(self, plugin):
+        """OneBot 下消息快照拿不到昵称时,实时查群名片补齐。"""
+        plugin._storage.save_bindings({"1": self._b("1", "新名片")})
+        event = FakeEvent("999")  # aiocqhttp:uid 纯数字 → qlogo 头像可用
+        event.get_sender_name = lambda: ""
+        event.message_obj.group_id = "123456"
+        event.bot = TestProfileRefresh._FakeBot(
+            {"get_group_member_info": {"card": "新名片", "nickname": "n"}}
+        )
+
+        results = self._run(plugin, event)
+
+        assert "找到昵称为「新名片」的已绑定课表" in results[0]
 
     def test_link_asks_confirmation_on_unique_strong_match(self, plugin):
         plugin._storage.save_bindings(
@@ -1172,6 +1337,41 @@ class TestProfileRefresh:
             members, start.astimezone(timezone.utc), "日", cards={"1": "群新名片"}
         )
         assert data["rows"][0]["nickname"] == "群新名片"
+
+    def test_refresh_fills_official_avatar_via_qqapp(self, plugin):
+        """qq_official:查询时把绑定的头像刷成 qqapp 官方头像服务地址。"""
+        plugin._storage.save_bindings(
+            {"openid-x": TestLinkBinding._b("openid-x", "Alice")}
+        )
+        binding = plugin._storage.get_binding("openid-x")
+        event = TestAvatarProfile._official_appid_event("openid-x")
+
+        asyncio.run(plugin._refresh_binding_profile(event, binding))
+
+        expected = "https://q.qlogo.cn/qqapp/888888/openid-x/640"
+        assert plugin._storage.get_binding("openid-x").avatar == expected
+        assert binding.avatar == expected  # @他人查询也能刷出对方头像
+
+    def test_collect_group_now_fills_official_avatars(self, plugin):
+        """qq_official 群聚合图:未存档头像的成员用 qqapp 地址兜底。"""
+        today = datetime.now(SHANGHAI_TZ).date()
+        start = datetime.combine(today, dt_time(9, 0), tzinfo=SHANGHAI_TZ)
+        series = [
+            CourseSeries(
+                summary="高等数学",
+                dtstart=start,
+                duration=timedelta(minutes=95),
+                location="明理楼302",
+            )
+        ]
+        plugin._load_series = lambda b: series
+        members = [TestLinkBinding._b("openid-1", "成员A")]
+        now_utc = (start + timedelta(minutes=30)).astimezone(timezone.utc)
+
+        data = plugin._collect_group_now(members, now_utc, qq_app_id="888888")
+
+        member = data["groups"][0]["members"][0]
+        assert member["avatar"] == "https://q.qlogo.cn/qqapp/888888/openid-1/640"
 
 
 class TestAtQuery:

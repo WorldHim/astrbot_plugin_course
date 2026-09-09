@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import shutil
+import tempfile
 import time
 from datetime import datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
@@ -295,11 +296,19 @@ class CoursePlugin(Star):
             yield event.plain_result("你已绑定课表。如需更换，请先使用 /删除课表。")
             return
 
-        nickname = str(event.get_sender_name()).strip()
+        # 昵称优先级:命令后手动指定 > 消息快照 > OneBot API 实时查询
+        raw = (event.message_str or "").strip()
+        idx = raw.find("关联课表")
+        manual = (raw[idx + len("关联课表"):] if idx >= 0 else raw).strip()
+        nickname = manual or str(event.get_sender_name()).strip()
         avatar = _avatar_from_event(event)
-        if not nickname or not avatar:
+        if not nickname:
+            fetched_nick, _ = await self._fetch_aiocqhttp_profile(event, user_id)
+            nickname = fetched_nick
+        if not nickname:
             yield event.plain_result(
-                "暂时无法获取你的昵称或头像，无法匹配，请直接使用 /绑定课表。"
+                "暂时无法获取你的昵称，无法自动匹配。可在指令后带上昵称，"
+                "如：/关联课表 昵称；或直接使用 /绑定课表。"
             )
             return
 
@@ -307,6 +316,20 @@ class CoursePlugin(Star):
             self._storage.load_bindings(), user_id, nickname, avatar
         )
         candidates = strong or weak
+        verified = bool(strong) and len(strong) == 1
+        if not strong and weak and avatar:
+            # URL 字符串跨平台必然不同(qlogo vs qqapp 域名不同),改为
+            # 下载头像文件做内容指纹比对:一致者视为同一人,升级为可信匹配
+            fp_cur = await _avatar_fingerprint(avatar)
+            if fp_cur:
+                fp_matched = []
+                for b in weak:
+                    fp = await _avatar_fingerprint(_avatar_for(b))
+                    if fp and fp == fp_cur:
+                        fp_matched.append(b)
+                if fp_matched:
+                    candidates = fp_matched
+                    verified = True
         if len(candidates) != 1:
             yield event.plain_result(
                 "未找到（或找到多个）昵称与头像一致的已绑定课表，"
@@ -315,11 +338,12 @@ class CoursePlugin(Star):
             return
 
         target = candidates[0]
-        note = (
-            ""
-            if strong
-            else "\n(注意:对方头像地址与你的不同，请自行确认是本人课表)"
-        )
+        if verified:
+            note = ""
+        elif avatar:
+            note = "\n(注意:对方头像地址与你的不同，请自行确认是本人课表)"
+        else:
+            note = "\n(注意:未能获取你的头像，仅按昵称匹配，请自行确认是本人课表)"
         wait_seconds = self._cfg_int("bind_wait_seconds", 120, 10)
         yield event.plain_result(
             f"找到昵称为「{target.nickname}」的已绑定课表，这是你的吗？{note}\n"
@@ -658,7 +682,9 @@ class CoursePlugin(Star):
             return
 
         cards = await self._fetch_group_cards(event)
-        data = self._collect_group_now(members, now_utc, cards=cards)
+        data = self._collect_group_now(
+            members, now_utc, cards=cards, qq_app_id=_qq_official_appid(event)
+        )
         url = await self._render_schedule(
             GROUP_TMPL,
             data,
@@ -674,6 +700,7 @@ class CoursePlugin(Star):
         members: Sequence[UserBinding],
         now_utc: datetime,
         cards: Optional[Dict[str, str]] = None,
+        qq_app_id: str = "",
     ) -> dict:
         """收集群成员"此刻正在上"的课程并按课程分组(含头像)。
 
@@ -709,7 +736,10 @@ class CoursePlugin(Star):
             group["members"].append(
                 {
                     "nickname": nickname,
-                    "avatar": _avatar_for(binding),
+                    # qq_official: qqapp 头像服务优先(官方无其它来源);
+                    # OneBot: qlogo 推导(qq_app_id 为空时回落)
+                    "avatar": _qqapp_avatar_url(qq_app_id, binding.user_id)
+                    or _avatar_for(binding),
                 }
             )
 
@@ -770,7 +800,13 @@ class CoursePlugin(Star):
             return
 
         cards = await self._fetch_group_cards(event)
-        data = self._collect_study_rank(members, now_utc, mode, cards=cards)
+        data = self._collect_study_rank(
+            members,
+            now_utc,
+            mode,
+            cards=cards,
+            qq_app_id=_qq_official_appid(event),
+        )
         url = await self._render_schedule(
             RANK_TMPL,
             data,
@@ -787,6 +823,7 @@ class CoursePlugin(Star):
         now_utc: datetime,
         mode: str,
         cards: Optional[Dict[str, str]] = None,
+        qq_app_id: str = "",
     ) -> dict:
         """统计本群成员的日/周上课总时长并排名(渲染与文字兜底共用)。
 
@@ -832,7 +869,8 @@ class CoursePlugin(Star):
                         or binding.nickname
                         or binding.user_id
                     ),
-                    "avatar": _avatar_for(binding),
+                    "avatar": _qqapp_avatar_url(qq_app_id, binding.user_id)
+                    or _avatar_for(binding),
                     "seconds": seconds,
                     "count": count,
                 }
@@ -1059,6 +1097,13 @@ class CoursePlugin(Star):
         nickname, avatar = await self._fetch_aiocqhttp_profile(
             event, binding.user_id
         )
+        if not nickname and not avatar:
+            # OneBot 不可用 → qq_official 的 qqapp 头像服务(仅头像,
+            # 官方群聊无昵称查询 API);appid 是机器人自己的,openid
+            # 用绑定记录里的,因此 @他人查询也能刷出对方头像。
+            avatar = _qqapp_avatar_url(
+                _qq_official_appid(event), binding.user_id
+            )
         if not nickname and not avatar:
             return
         bindings = self._storage.load_bindings()
@@ -1449,13 +1494,81 @@ def _avatar_url(user_id: str) -> str:
     return f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=100"
 
 
+def _qq_official_appid(event: AstrMessageEvent) -> str:
+    """从 qq_official 事件的 botpy 客户端链上取机器人 AppID。
+
+    链路: event.message_obj.raw_message(botpy Message)._api(BotAPI)
+    ._http(BotHttp)._token(Token).app_id;非 qq_official 或链路缺失
+    时返回空串。
+    """
+    raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+    http = getattr(getattr(raw, "_api", None), "_http", None)
+    return str(getattr(getattr(http, "_token", None), "app_id", "") or "")
+
+
+def _qqapp_avatar_url(appid: str, openid: str) -> str:
+    """QQ 官方机器人头像服务(appid + openid;640 尺寸,渲染时缩小)。"""
+    return (
+        f"https://q.qlogo.cn/qqapp/{appid}/{openid}/640"
+        if appid and openid
+        else ""
+    )
+
+
+# 头像内容指纹缓存:URL → 8x8 灰度平均哈希(进程生命周期;关联为低频操作)
+_AVATAR_FP_CACHE: Dict[str, Optional[str]] = {}
+
+
+def _avatar_fingerprint_from_file(path: str) -> Optional[str]:
+    """计算头像图片的内容指纹(8x8 灰度平均哈希 aHash)。
+
+    qlogo 与 qqapp 官方头像服务返回的尺寸/编码不同,字节级哈希不可比;
+    统一缩放到 8x8 灰度后按均值二值化,同一头像的指纹稳定一致,
+    不同头像的指纹几乎必然不同。Pillow 缺失或图片损坏时返回 None。
+    """
+    try:
+        from PIL import Image  # AstrBot 运行环境自带 pillow
+
+        with Image.open(path) as im:
+            gray = im.convert("L").resize((8, 8))
+            pixels = list(gray.getdata())
+    except Exception as e:
+        logger.warning(f"[course] avatar fingerprint failed: {e!r}")
+        return None
+    avg = sum(pixels) / len(pixels)
+    bits = "".join("1" if p >= avg else "0" for p in pixels)
+    return f"{int(bits, 2):016x}"
+
+
+async def _avatar_fingerprint(url: str) -> Optional[str]:
+    """下载头像并计算内容指纹(带进程级缓存,避免重复下载)。"""
+    if not url:
+        return None
+    if url in _AVATAR_FP_CACHE:
+        return _AVATAR_FP_CACHE[url]
+    tmp_path = (
+        Path(tempfile.gettempdir())
+        / f"course_avatar_fp_{hashlib.md5(url.encode('utf-8')).hexdigest()}"
+    )
+    try:
+        await download_file(url, str(tmp_path))
+        fp = _avatar_fingerprint_from_file(str(tmp_path))
+    except Exception as e:
+        logger.warning(f"[course] avatar download failed ({url}): {e!r}")
+        fp = None
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+    _AVATAR_FP_CACHE[url] = fp
+    return fp
+
+
 def _avatar_from_event(event: AstrMessageEvent) -> str:
     """从消息事件提取发送者头像 URL。
 
-    qq_official 平台的消息 payload 里 author 可能携带 avatar/username
-    (AstrBot 适配器把原始 payload patch 进 raw_message.raw_data);
-    aiocqhttp 的 user_id 即 QQ 号,直接用 qlogo 推导。都拿不到时返回
-    空串(模板 onerror 隐藏兜底)。
+    优先级:qq_official 消息 payload 里 author.avatar(平台下发时)
+    > qqapp 官方头像服务(appid + openid,群聊场景也能出图)
+    > aiocqhttp 的 QQ 号 qlogo 推导。都拿不到时返回空串
+    (模板 onerror 隐藏兜底)。
     """
     raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
     raw_data = getattr(raw, "raw_data", None)
@@ -1465,6 +1578,9 @@ def _avatar_from_event(event: AstrMessageEvent) -> str:
             avatar = author.get("avatar")
             if isinstance(avatar, str) and avatar:
                 return avatar
+    appid = _qq_official_appid(event)
+    if appid:
+        return _qqapp_avatar_url(appid, event.get_sender_id())
     user_id = event.get_sender_id()
     if user_id.isdigit():
         return _avatar_url(user_id)
@@ -1486,20 +1602,21 @@ def _find_link_candidates(
     """按昵称(+头像)匹配可复用课表的绑定(供 /关联课表)。
 
     返回 (强候选[昵称与头像 URL 都一致], 弱候选[仅昵称一致])。
-    跨平台头像地址不同(qlogo vs 官方 CDN)时会落入弱候选,由确认
-    交互兜底;user_id 相同(自己)的记录不参与匹配。
+    头像拿不到(qq_official 可能不下发)时不拒绝请求:全部落入弱候选,
+    由确认交互与提示文案兜底;跨平台头像地址不同(qlogo vs 官方 CDN)
+    同样落弱候选。user_id 相同(自己)的记录不参与匹配。
     """
     nickname = (nickname or "").strip()
     strong: list[UserBinding] = []
     weak: list[UserBinding] = []
-    if not nickname or not avatar:
+    if not nickname:
         return strong, weak
     for b in bindings.values():
         if b.user_id == user_id:
             continue
         if not b.nickname or b.nickname.strip() != nickname:
             continue
-        if _avatar_for(b) == avatar:
+        if avatar and _avatar_for(b) == avatar:
             strong.append(b)
         else:
             weak.append(b)
