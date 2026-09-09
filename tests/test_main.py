@@ -14,6 +14,7 @@ from astrbot_plugin_course.main import (
     _avatar_url,
     _day_text_fallback,
     _event_view,
+    _find_link_candidates,
     _format_rank_total,
     _group_now_text,
     _resolve_timezone,
@@ -263,7 +264,7 @@ class TestHelpCommand:
     def test_render_data_structure(self):
         data = help_render_data(PLUGIN_VERSION)
         cmds = [c["cmd"] for s in data["sections"] for c in s["commands"]]
-        assert len(cmds) == 13
+        assert len(cmds) == 14
         assert all(c.startswith("/") for c in cmds)
         assert data["version"] == PLUGIN_VERSION  # 版本号进缓存键:同版本同图
         assert data["title"]
@@ -864,6 +865,149 @@ class TestAvatarProfile:
             avatar="https://thirdqq.qq.com/new.png",
         )
         assert b3.avatar == "https://thirdqq.qq.com/new.png"
+
+
+class TestLinkBinding:
+    """/关联课表:昵称+头像匹配候选、确认交互前置分支与复用逻辑。"""
+
+    OFFICIAL_AVATAR = "https://thirdqq.qq.com/me.png"
+
+    @staticmethod
+    def _b(uid, nickname, avatar=""):
+        b = make_binding(uid, avatar=avatar)
+        b.nickname = nickname
+        return b
+
+    def _official_event(self, uid="me"):
+        # 模拟 qq_official:原始 payload 的 author 带头像
+        return FakeEvent(uid, raw_author={"avatar": self.OFFICIAL_AVATAR})
+
+    @staticmethod
+    def _run(plugin, event):
+        async def run():
+            return [r async for r in plugin.link(event)]
+
+        return asyncio.run(run())
+
+    # ---- _find_link_candidates ----
+
+    def test_candidates_strong_nickname_and_avatar(self):
+        bindings = {
+            "a": self._b("a", "Alice", avatar=self.OFFICIAL_AVATAR),
+            "b": self._b("b", "Bob"),
+        }
+        strong, weak = _find_link_candidates(
+            bindings, "me", "Alice", self.OFFICIAL_AVATAR
+        )
+        assert [b.user_id for b in strong] == ["a"]
+        assert weak == []
+
+    def test_candidates_weak_when_avatar_differs(self):
+        # 跨平台头像地址不同(qlogo vs 官方 CDN)→ 仅昵称匹配,落入弱候选
+        bindings = {"a": self._b("a", "Alice", avatar=_avatar_url("a"))}
+        strong, weak = _find_link_candidates(
+            bindings, "me", "Alice", self.OFFICIAL_AVATAR
+        )
+        assert strong == []
+        assert [b.user_id for b in weak] == ["a"]
+
+    def test_candidates_exclude_self_and_blank_nicknames(self):
+        bindings = {
+            "me": self._b("me", "Alice", avatar=self.OFFICIAL_AVATAR),
+            "x": self._b("x", "   "),  # 空白昵称不参与
+        }
+        strong, weak = _find_link_candidates(
+            bindings, "me", "Alice", self.OFFICIAL_AVATAR
+        )
+        assert strong == []
+        assert weak == []
+
+    def test_candidates_require_nickname_and_avatar(self):
+        assert _find_link_candidates({}, "me", "", "http://a") == ([], [])
+        assert _find_link_candidates({}, "me", "Alice", "") == ([], [])
+
+    # ---- link 命令前置分支 ----
+
+    def test_link_hints_when_already_bound(self, plugin):
+        plugin._storage.save_bindings({"me": self._b("me", "tester")})
+        results = self._run(plugin, self._official_event())
+        assert results == ["你已绑定课表。如需更换，请先使用 /删除课表。"]
+
+    def test_link_hints_direct_bind_without_match(self, plugin):
+        results = self._run(plugin, self._official_event())
+        assert "请直接使用 /绑定课表" in results[0]
+
+    def test_link_hints_when_nickname_missing(self, plugin):
+        # 官方未下发昵称 → 无法可靠匹配
+        event = self._official_event()
+        event.get_sender_name = lambda: ""
+        results = self._run(plugin, event)
+        assert "无法匹配" in results[0]
+
+    def test_link_asks_confirmation_on_unique_strong_match(self, plugin):
+        plugin._storage.save_bindings(
+            {"a": self._b("a", "tester", avatar=self.OFFICIAL_AVATAR)}
+        )
+        results = self._run(plugin, self._official_event())
+        assert "找到昵称为「tester」的已绑定课表" in results[0]
+        assert "确认" in results[0] and "退出" in results[0]
+
+    def test_link_weak_match_notes_verification(self, plugin):
+        plugin._storage.save_bindings(
+            {"a": self._b("a", "tester", avatar="https://other/cdn.png")}
+        )
+        results = self._run(plugin, self._official_event())
+        assert "请自行确认" in results[0]
+
+    def test_link_hints_direct_bind_on_multiple_matches(self, plugin):
+        plugin._storage.save_bindings(
+            {
+                "a": self._b("a", "tester", avatar=self.OFFICIAL_AVATAR),
+                "b": self._b("b", "tester", avatar=self.OFFICIAL_AVATAR),
+            }
+        )
+        results = self._run(plugin, self._official_event())
+        assert "请直接使用 /绑定课表" in results[0]
+
+    # ---- _apply_link 复用执行 ----
+
+    def test_apply_link_copies_ics_and_binds(self, plugin, monkeypatch):
+        target = self._b("a", "tester", avatar=self.OFFICIAL_AVATAR)
+        src = plugin._storage.get_ics_path("a")
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text("BEGIN:VCALENDAR", encoding="utf-8")
+        monkeypatch.setattr(
+            plugin._parser, "parse_ics_file", lambda p: [object(), object()]
+        )
+
+        event = self._official_event()
+        message = plugin._apply_link("me", event, target)
+
+        assert "关联成功" in message and "2 条" in message
+        binding = plugin._storage.get_binding("me")
+        assert binding is not None
+        assert binding.unified_msg_origin == event.unified_msg_origin
+        assert binding.avatar == self.OFFICIAL_AVATAR  # 记录自己的头像
+        dst = plugin._storage.resolve_ics_path(binding)
+        assert dst.exists() and dst != src  # 复制而非引用
+
+    def test_apply_link_fails_when_source_missing(self, plugin):
+        message = plugin._apply_link(
+            "me", self._official_event(), self._b("ghost", "tester")
+        )
+        assert "关联失败" in message
+
+    def test_apply_link_fails_on_parse_error(self, plugin, monkeypatch):
+        target = self._b("a", "tester")
+        src = plugin._storage.get_ics_path("a")
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text("garbage", encoding="utf-8")
+        monkeypatch.setattr(plugin._parser, "parse_ics_file", lambda p: None)
+
+        message = plugin._apply_link("me", self._official_event(), target)
+
+        assert "关联失败" in message
+        assert not plugin._storage.get_ics_path("me").exists()  # 失败时删除复制的文件
 
 
 class TestAtQuery:

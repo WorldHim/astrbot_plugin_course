@@ -116,9 +116,15 @@ def _install_astrbot_stubs():
             return event.unified_msg_origin
 
     def _session_waiter(timeout=None, record_history_chains=False):
+        """fake:不进入交互循环,直接返回(模拟立即放弃等待)。
+
+        waiter 内部的确认/退出分支无法在该 fake 下驱动;交互的执行
+        逻辑(如 link 的 _apply_link)由测试直接调用辅助方法覆盖。
+        """
+
         def deco(f):
             async def wrapper(ev, session_filter=None, *a, **k):
-                return await f(ev, session_filter, *a, **k)
+                return None
 
             return wrapper
 

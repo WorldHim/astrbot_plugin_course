@@ -287,6 +287,95 @@ class CoursePlugin(Star):
         else:
             yield event.plain_result("你还没有绑定课表。")
 
+    @filter.command("关联课表")
+    async def link(self, event: AstrMessageEvent):
+        """复用昵称与头像一致的已绑定课表(跨平台/换群免重新上传)。"""
+        user_id = str(event.get_sender_id())
+        if self._storage.get_binding(user_id):
+            yield event.plain_result("你已绑定课表。如需更换，请先使用 /删除课表。")
+            return
+
+        nickname = str(event.get_sender_name()).strip()
+        avatar = _avatar_from_event(event)
+        if not nickname or not avatar:
+            yield event.plain_result(
+                "暂时无法获取你的昵称或头像，无法匹配，请直接使用 /绑定课表。"
+            )
+            return
+
+        strong, weak = _find_link_candidates(
+            self._storage.load_bindings(), user_id, nickname, avatar
+        )
+        candidates = strong or weak
+        if len(candidates) != 1:
+            yield event.plain_result(
+                "未找到（或找到多个）昵称与头像一致的已绑定课表，"
+                "请直接使用 /绑定课表。"
+            )
+            return
+
+        target = candidates[0]
+        note = (
+            ""
+            if strong
+            else "\n(注意:对方头像地址与你的不同，请自行确认是本人课表)"
+        )
+        wait_seconds = self._cfg_int("bind_wait_seconds", 120, 10)
+        yield event.plain_result(
+            f"找到昵称为「{target.nickname}」的已绑定课表，这是你的吗？{note}\n"
+            f"回复\"确认\"将复用这份课表(不会影响对方)；"
+            f"回复\"退出\"取消。({wait_seconds}秒内有效)"
+        )
+
+        async def waiter(controller: SessionController, evt: AstrMessageEvent):
+            text = (evt.message_str or "").strip()
+            if text == "退出":
+                await evt.send(evt.plain_result("已取消关联。"))
+                controller.stop()
+                return
+            if text == "确认":
+                message = self._apply_link(user_id, evt, target)
+                await evt.send(evt.plain_result(message))
+                controller.stop()
+                return
+            await evt.send(evt.plain_result('请回复"确认"或"退出"。'))
+            controller.keep(timeout=wait_seconds, reset_timeout=True)
+
+        waiter = session_waiter(
+            timeout=wait_seconds, record_history_chains=False
+        )(waiter)
+        try:
+            await waiter(event, session_filter=_SenderSessionFilter())
+        except TimeoutError:
+            yield event.plain_result("关联超时。")
+        finally:
+            event.stop_event()
+
+    def _apply_link(
+        self, user_id: str, evt: AstrMessageEvent, target: UserBinding
+    ) -> str:
+        """复制 target 的课表给 user_id 并建立绑定(复制而非引用,两边独立)。"""
+        src = self._storage.resolve_ics_path(target)
+        if not src.exists():
+            return "对方课表文件缺失，关联失败，请直接使用 /绑定课表。"
+        dst = self._storage.get_ics_path(user_id)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dst)
+        parsed = self._parser.parse_ics_file(str(dst))
+        if parsed is None or not parsed:
+            dst.unlink(missing_ok=True)
+            return "对方课表文件解析失败，关联失败，请直接使用 /绑定课表。"
+        self._storage.upsert_binding(
+            user_id=user_id,
+            unified_msg_origin=evt.unified_msg_origin,
+            nickname=str(evt.get_sender_name()),
+            avatar=_avatar_from_event(evt),
+        )
+        return (
+            f"关联成功，已复用「{target.nickname}」的课表"
+            f"(共 {len(parsed)} 条课程安排)。"
+        )
+
     @filter.command("设置每日推送")
     async def set_daily_push(self, event: AstrMessageEvent):
         user_id = str(event.get_sender_id())
@@ -1234,6 +1323,35 @@ def _avatar_for(binding: UserBinding) -> str:
     """渲染用头像 URL:绑定记录的优先(qq_official 的 openid 头像),
     否则按 QQ 号推导;openid 且无记录时为无效 URL,由模板 onerror 隐藏。"""
     return binding.avatar or _avatar_url(binding.user_id)
+
+
+def _find_link_candidates(
+    bindings: Dict[str, UserBinding],
+    user_id: str,
+    nickname: str,
+    avatar: str,
+) -> tuple[list[UserBinding], list[UserBinding]]:
+    """按昵称(+头像)匹配可复用课表的绑定(供 /关联课表)。
+
+    返回 (强候选[昵称与头像 URL 都一致], 弱候选[仅昵称一致])。
+    跨平台头像地址不同(qlogo vs 官方 CDN)时会落入弱候选,由确认
+    交互兜底;user_id 相同(自己)的记录不参与匹配。
+    """
+    nickname = (nickname or "").strip()
+    strong: list[UserBinding] = []
+    weak: list[UserBinding] = []
+    if not nickname or not avatar:
+        return strong, weak
+    for b in bindings.values():
+        if b.user_id == user_id:
+            continue
+        if not b.nickname or b.nickname.strip() != nickname:
+            continue
+        if _avatar_for(b) == avatar:
+            strong.append(b)
+        else:
+            weak.append(b)
+    return strong, weak
 
 
 def _courses_lines(courses) -> list[str]:
