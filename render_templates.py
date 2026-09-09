@@ -36,6 +36,11 @@ DAY_TMPL = r"""
       justify-content: space-between;
       align-items: center;
     }
+    .title-group {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
     .title-group h1 {
       font-size: 28px;
       font-weight: 900;
@@ -43,6 +48,20 @@ DAY_TMPL = r"""
       display: flex;
       align-items: center;
       gap: 8px;
+    }
+    .avatar {
+      width: 46px;
+      height: 46px;
+      border-radius: 50%;
+      object-fit: cover;
+      border: 2px solid var(--accent-soft);
+      background: var(--accent-soft);
+    }
+    .owner-name {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--text-muted);
+      margin-top: 2px;
     }
     .date-badge {
       font-size: 14px;
@@ -92,7 +111,12 @@ DAY_TMPL = r"""
   <div class="container">
     <div class="header">
       <div class="title-group">
-        <h1>📅 {{ title }}</h1>
+        <img class="avatar" src="{{ avatar }}"
+             onerror="this.onerror=null;this.style.visibility='hidden'" />
+        <div>
+          <h1>📅 {{ title }}</h1>
+          <div class="owner-name">{{ subtitle.split(' | ')[0] }}</div>
+        </div>
       </div>
       <div class="date-badge">{{ subtitle.split(' | ')[1] }}</div>
     </div>
@@ -158,8 +182,27 @@ WEEK_TMPL = r"""
       border-bottom: 2px solid var(--border);
       padding-bottom: 12px;
     }
+    .owner {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .avatar {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      object-fit: cover;
+      border: 2px solid var(--today-bg);
+      background: var(--today-bg);
+    }
     .title { font-size: 24px; font-weight: 900; color: var(--text-main); }
     .subtitle { font-size: 12px; font-weight: 600; color: var(--text-muted); }
+    .owner-name {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
 
     /* 核心：2列网格布局 */
     .grid { 
@@ -238,7 +281,14 @@ WEEK_TMPL = r"""
 <body>
   <div class="container">
     <div class="title-area">
-      <h1 class="title">{{ title }}</h1>
+      <div class="owner">
+        <img class="avatar" src="{{ avatar }}"
+             onerror="this.onerror=null;this.style.visibility='hidden'" />
+        <div>
+          <h1 class="title">{{ title }}</h1>
+          <p class="owner-name">{{ subtitle.split(' | ')[0] }}</p>
+        </div>
+      </div>
       <p class="subtitle">{{ subtitle.split(' | ')[1] }}</p>
     </div>
     

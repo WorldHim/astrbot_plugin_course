@@ -9,6 +9,7 @@ from astrbot_plugin_course.help_content import TOOL_LINK, help_render_data, help
 from astrbot_plugin_course.main import (
     PLUGIN_VERSION,
     _SenderSessionFilter,
+    _avatar_url,
     _day_text_fallback,
     _event_view,
     _format_rank_total,
@@ -864,6 +865,8 @@ class TestAtQuery:
         # 展示的是被 at 的 Alice 的课表(副标题带她的昵称)
         assert "Alice" in captured[0]["subtitle"]
         assert "Bob" not in captured[0]["subtitle"]
+        # 头部带用户头像与名字
+        assert captured[0]["avatar"] == _avatar_url("u1")
 
     def test_at_unbound_user_hints(self, plugin):
         plugin._storage.save_bindings({"u2": self._binding("u2", "Bob")})
@@ -924,6 +927,7 @@ class TestAtQuery:
         results = asyncio.run(run())
         assert results == [("image", "http://fake/at_week.png")]
         assert "Alice" in captured[0]["subtitle"]
+        assert captured[0]["avatar"] == _avatar_url("u1")  # 周课表同样带头像
 
     def test_at_other_with_broken_series_hints_rebind(self, plugin):
         plugin._storage.save_bindings({"u1": self._binding("u1", "Alice")})

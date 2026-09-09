@@ -537,6 +537,7 @@ class CoursePlugin(Star):
             {
                 "title": title,
                 "subtitle": subtitle,
+                "avatar": _avatar_url(binding.user_id),
                 "days": days,
                 "page_width": self._cfg_int("week_render_width", 1280, 320),
             },
@@ -611,9 +612,7 @@ class CoursePlugin(Star):
             group["members"].append(
                 {
                     "nickname": nickname,
-                    "avatar": (
-                        f"https://q1.qlogo.cn/g?b=qq&nk={binding.user_id}&s=100"
-                    ),
+                    "avatar": _avatar_url(binding.user_id),
                 }
             )
 
@@ -727,9 +726,7 @@ class CoursePlugin(Star):
             rows.append(
                 {
                     "nickname": binding.nickname or binding.user_id,
-                    "avatar": (
-                        f"https://q1.qlogo.cn/g?b=qq&nk={binding.user_id}&s=100"
-                    ),
+                    "avatar": _avatar_url(binding.user_id),
                     "seconds": seconds,
                     "count": count,
                 }
@@ -796,6 +793,7 @@ class CoursePlugin(Star):
             {
                 "title": title,
                 "subtitle": subtitle,
+                "avatar": _avatar_url(binding.user_id),
                 "days": days,
                 "page_width": self._cfg_int("week_render_width", 1280, 320),
             },
@@ -912,6 +910,7 @@ class CoursePlugin(Star):
             {
                 "title": title,
                 "subtitle": subtitle,
+                "avatar": _avatar_url(binding.user_id),
                 "courses": courses,
                 "page_width": self._cfg_int("day_render_width", 500, 320),
             },
@@ -1201,6 +1200,11 @@ class CoursePlugin(Star):
             else:
                 self._reminded.pop(user_id, None)
         return changed
+
+
+def _avatar_url(user_id: str) -> str:
+    """QQ 头像 URL(qq 官方头像服务;模板 onerror 兜底隐藏)。"""
+    return f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=100"
 
 
 def _courses_lines(courses) -> list[str]:
