@@ -66,6 +66,8 @@ class CourseStorage:
                     ),
                     daily_push_job_id=str(item.get("daily_push_job_id", "")),
                     timezone_name=str(item.get("timezone_name", "Asia/Shanghai")),
+                    # 旧版数据无该字段 → 空串(渲染回退 qlogo 推导/隐藏占位)
+                    avatar=str(item.get("avatar", "")),
                 )
             except Exception as e:
                 logger.warning(f"[course] skip invalid binding for {user_id}: {e}")
@@ -229,6 +231,7 @@ class CourseStorage:
         default_reminder_minutes: int = 15,
         default_push_time: str = "07:00",
         default_timezone: str = "Asia/Shanghai",
+        avatar: str = "",
     ) -> UserBinding:
         bindings = self.load_bindings()
         prev = bindings.get(user_id)
@@ -250,6 +253,8 @@ class CourseStorage:
             ),
             daily_push_job_id=prev.daily_push_job_id if prev else "",
             timezone_name=prev.timezone_name if prev else default_timezone,
+            # 本次没提取到头像时保留旧值(qq_official payload 不一定下发 avatar)
+            avatar=avatar or (prev.avatar if prev else ""),
         )
         bindings[user_id] = binding
         self.save_bindings(bindings)

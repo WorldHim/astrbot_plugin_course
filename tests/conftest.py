@@ -171,7 +171,7 @@ class FakeContext:
 
 
 class FakeEvent:
-    def __init__(self, uid, unified_msg_origin=None, at=None):
+    def __init__(self, uid, unified_msg_origin=None, at=None, raw_author=None):
         self._uid = uid
         self.message_str = ""
         # at: 被回复/at 的用户 ID(模拟命令后 at 群友);None 表示消息里没有 at
@@ -181,6 +181,12 @@ class FakeEvent:
         else:
             message = []
         self.message_obj = types.SimpleNamespace(message=message)
+        # raw_author: 模拟 qq_official 原始 payload 的 author 字段
+        # (AstrBot 适配器把原始 payload patch 进 raw_message.raw_data)
+        if raw_author is not None:
+            self.message_obj.raw_message = types.SimpleNamespace(
+                raw_data={"author": raw_author}
+            )
         self.unified_msg_origin = unified_msg_origin or f"test:{uid}"
 
     def get_sender_id(self):
@@ -199,7 +205,7 @@ class FakeEvent:
         pass
 
 
-def make_binding(uid: str, minutes: int = 15) -> UserBinding:
+def make_binding(uid: str, minutes: int = 15, avatar: str = "") -> UserBinding:
     return UserBinding(
         user_id=uid,
         unified_msg_origin=f"test:{uid}",
@@ -207,6 +213,7 @@ def make_binding(uid: str, minutes: int = 15) -> UserBinding:
         ics_file=f"ics/{uid}.ics",
         updated_at_ts=0.0,
         reminder_advance_minutes=minutes,
+        avatar=avatar,
     )
 
 

@@ -248,6 +248,7 @@ class CoursePlugin(Star):
                     ),
                     default_push_time=self._cfg("default_push_time", "07:00"),
                     default_timezone=self._cfg("default_timezone", "Asia/Shanghai"),
+                    avatar=_avatar_from_event(evt),
                 )
                 await evt.send(
                     evt.plain_result(f"绑定成功，共识别到 {len(parsed)} 条课程安排。")
@@ -537,7 +538,7 @@ class CoursePlugin(Star):
             {
                 "title": title,
                 "subtitle": subtitle,
-                "avatar": _avatar_url(binding.user_id),
+                "avatar": _avatar_for(binding),
                 "days": days,
                 "page_width": self._cfg_int("week_render_width", 1280, 320),
             },
@@ -612,7 +613,7 @@ class CoursePlugin(Star):
             group["members"].append(
                 {
                     "nickname": nickname,
-                    "avatar": _avatar_url(binding.user_id),
+                    "avatar": _avatar_for(binding),
                 }
             )
 
@@ -726,7 +727,7 @@ class CoursePlugin(Star):
             rows.append(
                 {
                     "nickname": binding.nickname or binding.user_id,
-                    "avatar": _avatar_url(binding.user_id),
+                    "avatar": _avatar_for(binding),
                     "seconds": seconds,
                     "count": count,
                 }
@@ -793,7 +794,7 @@ class CoursePlugin(Star):
             {
                 "title": title,
                 "subtitle": subtitle,
-                "avatar": _avatar_url(binding.user_id),
+                "avatar": _avatar_for(binding),
                 "days": days,
                 "page_width": self._cfg_int("week_render_width", 1280, 320),
             },
@@ -910,7 +911,7 @@ class CoursePlugin(Star):
             {
                 "title": title,
                 "subtitle": subtitle,
-                "avatar": _avatar_url(binding.user_id),
+                "avatar": _avatar_for(binding),
                 "courses": courses,
                 "page_width": self._cfg_int("day_render_width", 500, 320),
             },
@@ -1205,6 +1206,34 @@ class CoursePlugin(Star):
 def _avatar_url(user_id: str) -> str:
     """QQ 头像 URL(qq 官方头像服务;模板 onerror 兜底隐藏)。"""
     return f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=100"
+
+
+def _avatar_from_event(event: AstrMessageEvent) -> str:
+    """从消息事件提取发送者头像 URL。
+
+    qq_official 平台的消息 payload 里 author 可能携带 avatar/username
+    (AstrBot 适配器把原始 payload patch 进 raw_message.raw_data);
+    aiocqhttp 的 user_id 即 QQ 号,直接用 qlogo 推导。都拿不到时返回
+    空串(模板 onerror 隐藏兜底)。
+    """
+    raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+    raw_data = getattr(raw, "raw_data", None)
+    if isinstance(raw_data, dict):
+        author = raw_data.get("author")
+        if isinstance(author, dict):
+            avatar = author.get("avatar")
+            if isinstance(avatar, str) and avatar:
+                return avatar
+    user_id = event.get_sender_id()
+    if user_id.isdigit():
+        return _avatar_url(user_id)
+    return ""
+
+
+def _avatar_for(binding: UserBinding) -> str:
+    """渲染用头像 URL:绑定记录的优先(qq_official 的 openid 头像),
+    否则按 QQ 号推导;openid 且无记录时为无效 URL,由模板 onerror 隐藏。"""
+    return binding.avatar or _avatar_url(binding.user_id)
 
 
 def _courses_lines(courses) -> list[str]:

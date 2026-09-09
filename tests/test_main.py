@@ -9,6 +9,8 @@ from astrbot_plugin_course.help_content import TOOL_LINK, help_render_data, help
 from astrbot_plugin_course.main import (
     PLUGIN_VERSION,
     _SenderSessionFilter,
+    _avatar_for,
+    _avatar_from_event,
     _avatar_url,
     _day_text_fallback,
     _event_view,
@@ -813,6 +815,57 @@ class TestStudyRank:
         assert "天" not in data["rows"][0]["total"]
 
 
+class TestAvatarProfile:
+    """qq_official 头像/昵称:payload 提取 + 绑定持久化 + 渲染优先级。"""
+
+    def test_extract_avatar_from_official_raw_payload(self):
+        # qq_official:AstrBot 把原始 payload patch 进 raw_message.raw_data
+        event = FakeEvent(
+            "openid-abc",
+            raw_author={"avatar": "https://thirdqq.qq.com/avatar.png"},
+        )
+        assert _avatar_from_event(event) == "https://thirdqq.qq.com/avatar.png"
+
+    def test_extract_falls_back_to_qlogo_for_numeric_id(self):
+        # aiocqhttp:user_id 即 QQ 号,payload 里没有 avatar 也推导得出
+        event = FakeEvent("123456")
+        assert _avatar_from_event(event) == _avatar_url("123456")
+
+    def test_extract_returns_empty_for_openid_without_payload(self):
+        # qq_official 未下发 avatar 时返回空串(模板 onerror 隐藏兜底)
+        event = FakeEvent("openid-abc")
+        assert _avatar_from_event(event) == ""
+
+    def test_avatar_for_prefers_recorded_avatar(self):
+        b = make_binding("openid-abc", avatar="https://thirdqq.qq.com/a.png")
+        assert _avatar_for(b) == "https://thirdqq.qq.com/a.png"
+
+    def test_avatar_for_falls_back_to_qlogo(self):
+        assert _avatar_for(make_binding("123456")) == _avatar_url("123456")
+
+    def test_upsert_persists_avatar_and_keeps_previous(self, storage):
+        b = storage.upsert_binding(
+            user_id="op1",
+            unified_msg_origin="t",
+            nickname="n",
+            avatar="https://thirdqq.qq.com/old.png",
+        )
+        assert b.avatar == "https://thirdqq.qq.com/old.png"
+        # 重新绑定但 payload 没带头像 → 保留旧头像
+        b2 = storage.upsert_binding(
+            user_id="op1", unified_msg_origin="t2", nickname="n2"
+        )
+        assert b2.avatar == "https://thirdqq.qq.com/old.png"
+        # payload 带新头像 → 覆盖更新
+        b3 = storage.upsert_binding(
+            user_id="op1",
+            unified_msg_origin="t3",
+            nickname="n3",
+            avatar="https://thirdqq.qq.com/new.png",
+        )
+        assert b3.avatar == "https://thirdqq.qq.com/new.png"
+
+
 class TestAtQuery:
     """查询命令支持命令后 at 群友,查看 TA 的课表。"""
 
@@ -867,6 +920,26 @@ class TestAtQuery:
         assert "Bob" not in captured[0]["subtitle"]
         # 头部带用户头像与名字
         assert captured[0]["avatar"] == _avatar_url("u1")
+
+    def test_at_query_uses_recorded_avatar(self, plugin):
+        """qq_official:绑定记录的头像优先于 qlogo 推导(openid 推导无效)。"""
+        alice = self._binding("openid-xyz", "Alice")
+        alice.avatar = "https://thirdqq.qq.com/alice.png"
+        plugin._storage.save_bindings({"openid-xyz": alice})
+        plugin._load_series = lambda b: self._today_courses()
+        captured = []
+
+        async def fake_render(template, data, options=None):
+            captured.append(data)
+            return "http://fake/official.png"
+
+        plugin.html_render = fake_render
+
+        async def run():
+            return [r async for r in plugin.today(FakeEvent("x", at="openid-xyz"))]
+
+        asyncio.run(run())
+        assert captured[0]["avatar"] == "https://thirdqq.qq.com/alice.png"
 
     def test_at_unbound_user_hints(self, plugin):
         plugin._storage.save_bindings({"u2": self._binding("u2", "Bob")})

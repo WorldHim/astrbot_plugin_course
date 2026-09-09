@@ -92,6 +92,9 @@ class UserBinding:
     reminder_advance_minutes: int = 15
     daily_push_job_id: str = ""
     timezone_name: str = "Asia/Shanghai"  # 用户所在时区(IANA 名称)
+    # 头像 URL:qq_official 下绑定时从消息 payload 提取(aiocqhttp 由 QQ 号推导,
+    # 见 main._avatar_for);拿不到时为空串,渲染回退 qlogo/隐藏占位。
+    avatar: str = ""
 
     def get_timezone(self) -> tzinfo:
         """用户所在时区;配置无效时回退东八区(ZoneInfo 或固定偏移 timezone)。"""
