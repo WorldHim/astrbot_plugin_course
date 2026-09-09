@@ -201,6 +201,9 @@ class FakeEvent:
     def get_sender_name(self):
         return "tester"
 
+    def get_platform_name(self):
+        return "aiocqhttp"
+
     def plain_result(self, msg):
         return msg
 

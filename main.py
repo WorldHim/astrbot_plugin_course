@@ -595,6 +595,8 @@ class CoursePlugin(Star):
             )
             return
 
+        await self._refresh_binding_profile(event, binding)
+
         series = self._load_series(binding)
         if series is None:
             yield event.plain_result(
@@ -655,7 +657,8 @@ class CoursePlugin(Star):
             )
             return
 
-        data = self._collect_group_now(members, now_utc)
+        cards = await self._fetch_group_cards(event)
+        data = self._collect_group_now(members, now_utc, cards=cards)
         url = await self._render_schedule(
             GROUP_TMPL,
             data,
@@ -667,7 +670,10 @@ class CoursePlugin(Star):
         yield event.image_result(url)
 
     def _collect_group_now(
-        self, members: Sequence[UserBinding], now_utc: datetime
+        self,
+        members: Sequence[UserBinding],
+        now_utc: datetime,
+        cards: Optional[Dict[str, str]] = None,
     ) -> dict:
         """收集群成员"此刻正在上"的课程并按课程分组(含头像)。
 
@@ -686,7 +692,8 @@ class CoursePlugin(Star):
             if current is None:
                 continue
 
-            nickname = binding.nickname or binding.user_id
+            # 群成员名片实时拉取(OneBot),覆盖绑定时存档的旧昵称
+            nickname = (cards or {}).get(binding.user_id) or binding.nickname or binding.user_id
             key = (current.summary, current.location, current.start_time.isoformat())
             group = groups.setdefault(
                 key,
@@ -762,7 +769,8 @@ class CoursePlugin(Star):
             )
             return
 
-        data = self._collect_study_rank(members, now_utc, mode)
+        cards = await self._fetch_group_cards(event)
+        data = self._collect_study_rank(members, now_utc, mode, cards=cards)
         url = await self._render_schedule(
             RANK_TMPL,
             data,
@@ -774,7 +782,11 @@ class CoursePlugin(Star):
         yield event.image_result(url)
 
     def _collect_study_rank(
-        self, members: Sequence[UserBinding], now_utc: datetime, mode: str
+        self,
+        members: Sequence[UserBinding],
+        now_utc: datetime,
+        mode: str,
+        cards: Optional[Dict[str, str]] = None,
     ) -> dict:
         """统计本群成员的日/周上课总时长并排名(渲染与文字兜底共用)。
 
@@ -815,7 +827,11 @@ class CoursePlugin(Star):
                 continue
             rows.append(
                 {
-                    "nickname": binding.nickname or binding.user_id,
+                    "nickname": (
+                        (cards or {}).get(binding.user_id)
+                        or binding.nickname
+                        or binding.user_id
+                    ),
                     "avatar": _avatar_for(binding),
                     "seconds": seconds,
                     "count": count,
@@ -849,6 +865,8 @@ class CoursePlugin(Star):
                 else "你还没有绑定课表。请先使用 /绑定课表"
             )
             return
+
+        await self._refresh_binding_profile(event, binding)
 
         series = self._load_series(binding)
         if series is None:
@@ -958,6 +976,138 @@ class CoursePlugin(Star):
                 return str(comp.qq)
         return None
 
+    @staticmethod
+    def _onebot_caller(bot):
+        """取 OneBot 调用入口:新版 aiocqhttp 用 call_action,旧版 call_api。
+
+        平台适配器名可自定义(如 aiocqhttp/onebot/napcat),因此不做平台
+        名判断,只要事件对象挂了可调用的 bot 客户端就尝试;拿不到返回 None。
+        """
+        for name in ("call_action", "call_api"):
+            fn = getattr(bot, name, None)
+            if callable(fn):
+                return fn
+        return None
+
+    @staticmethod
+    def _self_id_params(event: AstrMessageEvent) -> dict:
+        """多 OneBot 实例时按当前事件的机器人 self_id 路由 API 调用。"""
+        get_self = getattr(event, "get_self_id", None)
+        if not callable(get_self):
+            return {}
+        try:
+            self_id = str(get_self() or "")
+        except Exception:
+            return {}
+        return {"self_id": self_id} if self_id else {}
+
+    async def _fetch_aiocqhttp_profile(
+        self, event: AstrMessageEvent, user_id: str
+    ) -> tuple[str, str]:
+        """经 OneBot API 拉取用户最新昵称(群名片优先,QQ 昵称兜底)。
+
+        OneBot 的群名片/QQ 昵称随时会改,绑定时刻的快照会过时;群聊用
+        get_group_member_info,名片为空再补 get_stranger_info(nick/nickname
+        兼容不同实现)。失败时返回 ("", "") 由调用方保留原值。头像为
+        qlogo 动态地址(内容本就跟随当前头像),一并归一化写回。
+        """
+        bot = getattr(event, "bot", None)
+        call = self._onebot_caller(bot) if bot is not None else None
+        if call is None:
+            return "", ""
+        group_id = (
+            str(getattr(event, "group_id", "") or "")
+            or str(
+                getattr(getattr(event, "message_obj", None), "group_id", "") or ""
+            )
+        )
+        routing = self._self_id_params(event)
+        nickname = ""
+        try:
+            if group_id:
+                info = await call(
+                    action="get_group_member_info",
+                    group_id=int(group_id),
+                    user_id=int(user_id),
+                    no_cache=True,
+                    **routing,
+                )
+                nickname = str((info or {}).get("card") or "").strip()
+            if not nickname:
+                info = await call(
+                    action="get_stranger_info",
+                    user_id=int(user_id),
+                    no_cache=True,
+                    **routing,
+                )
+                nickname = str(
+                    (info or {}).get("nick") or (info or {}).get("nickname") or ""
+                ).strip()
+        except Exception as e:  # API 不可用/超时 → 保留绑定时的存档
+            logger.warning(f"[course] fetch profile failed: {e!r}")
+            return "", ""
+        return nickname, _avatar_url(user_id)
+
+    async def _refresh_binding_profile(
+        self, event: AstrMessageEvent, binding: UserBinding
+    ) -> None:
+        """个人课表查询前刷新绑定的昵称/头像并写回存储。
+
+        仅在事件挂有 OneBot 客户端(event.bot)时刷新;其它平台(qq_official
+        等)无此 API,保留绑定时刻的快照。API 失败时静默保留原值。
+        """
+        nickname, avatar = await self._fetch_aiocqhttp_profile(
+            event, binding.user_id
+        )
+        if not nickname and not avatar:
+            return
+        bindings = self._storage.load_bindings()
+        stored = bindings.get(binding.user_id)
+        if stored is None:
+            return
+        if nickname:
+            stored.nickname = nickname
+        if avatar:
+            stored.avatar = avatar
+        self._storage.save_bindings(bindings)
+        binding.nickname = stored.nickname
+        binding.avatar = stored.avatar
+
+    async def _fetch_group_cards(self, event: AstrMessageEvent) -> Dict[str, str]:
+        """一次性拉取本群全部成员的最新名片(当前课程/时长榜用)。
+
+        返回 {user_id: 昵称};事件无 OneBot 客户端/非群聊/API 失败时返回
+        空 dict,调用方回退到绑定时存档的昵称。
+        """
+        bot = getattr(event, "bot", None)
+        call = self._onebot_caller(bot) if bot is not None else None
+        if call is None:
+            return {}
+        group_id = (
+            str(getattr(event, "group_id", "") or "")
+            or str(
+                getattr(getattr(event, "message_obj", None), "group_id", "") or ""
+            )
+        )
+        if not group_id:
+            return {}
+        try:
+            members = await call(
+                action="get_group_member_list",
+                group_id=int(group_id),
+                no_cache=True,
+                **self._self_id_params(event),
+            )
+        except Exception as e:
+            logger.warning(f"[course] fetch group cards failed: {e!r}")
+            return {}
+        cards: Dict[str, str] = {}
+        for m in members or []:
+            uid = str(m.get("user_id", ""))
+            if uid:
+                cards[uid] = str(m.get("card") or m.get("nickname") or "").strip()
+        return cards
+
     def _resolve_view_binding(self, event: AstrMessageEvent):
         """解析课表查询目标:命令后 at 了群友则查 TA 的课表。
 
@@ -979,6 +1129,8 @@ class CoursePlugin(Star):
                 else "你还没有绑定课表。请先使用 /绑定课表"
             )
             return
+
+        await self._refresh_binding_profile(event, binding)
 
         series = self._load_series(binding)
         if series is None:

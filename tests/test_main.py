@@ -1010,6 +1010,170 @@ class TestLinkBinding:
         assert not plugin._storage.get_ics_path("me").exists()  # 失败时删除复制的文件
 
 
+class TestProfileRefresh:
+    """OneBot 查询时自动刷新群名片/昵称(写回)与群聚合图的实时名片。"""
+
+    class _FakeBot:
+        """模拟 OneBot client:call_action 返回预设或抛错,记录调用。"""
+
+        def __init__(self, responses=None, error=None):
+            self.responses = responses or {}
+            self.error = error
+            self.calls = []
+
+        async def call_action(self, action=None, **kwargs):
+            self.calls.append((action, kwargs))
+            if self.error:
+                raise self.error
+            return self.responses[action]
+
+        # 兼容旧版 aiocqhttp 的调用入口名
+        call_api = call_action
+
+    @staticmethod
+    def _b(uid, nickname):
+        b = make_binding(uid)
+        b.nickname = nickname
+        return b
+
+    def _group_event(self, uid="1", bot=None):
+        event = FakeEvent(uid)
+        event.message_obj.group_id = "123456"
+        if bot is not None:
+            event.bot = bot
+        return event
+
+    def test_refresh_updates_nickname_from_group_card(self, plugin):
+        plugin._storage.save_bindings({"1": self._b("1", "旧名片")})
+        binding = plugin._storage.get_binding("1")
+        bot = self._FakeBot(
+            {"get_group_member_info": {"card": "新名片", "nickname": "QQ昵称"}}
+        )
+
+        asyncio.run(plugin._refresh_binding_profile(self._group_event(bot=bot), binding))
+
+        assert plugin._storage.get_binding("1").nickname == "新名片"
+        assert binding.nickname == "新名片"  # 传入对象同步更新
+        assert plugin._storage.get_binding("1").avatar == _avatar_url("1")
+        # 只调了群成员信息 API(名片非空无需兜底查询)
+        assert [c[0] for c in bot.calls] == ["get_group_member_info"]
+
+    def test_refresh_works_with_custom_platform_name(self, plugin):
+        """平台适配器名可自定义(如 onebot/napcat),不应影响刷新。"""
+        plugin._storage.save_bindings({"1": self._b("1", "旧名片")})
+        binding = plugin._storage.get_binding("1")
+        bot = self._FakeBot(
+            {"get_group_member_info": {"card": "新名片", "nickname": "n"}}
+        )
+        event = self._group_event(bot=bot)
+        event.get_platform_name = lambda: "onebot"
+
+        asyncio.run(plugin._refresh_binding_profile(event, binding))
+
+        assert plugin._storage.get_binding("1").nickname == "新名片"
+
+    def test_refresh_falls_back_to_stranger_info_when_card_empty(self, plugin):
+        """群名片为空(未设置群名片)时补查 QQ 昵称。"""
+        plugin._storage.save_bindings({"1": self._b("1", "旧名片")})
+        binding = plugin._storage.get_binding("1")
+        bot = self._FakeBot(
+            {
+                "get_group_member_info": {"card": "", "nickname": "x"},
+                "get_stranger_info": {"nick": "QQ昵称"},
+            }
+        )
+
+        asyncio.run(plugin._refresh_binding_profile(self._group_event(bot=bot), binding))
+
+        assert plugin._storage.get_binding("1").nickname == "QQ昵称"
+
+    def test_refresh_keeps_old_nickname_on_api_failure(self, plugin):
+        plugin._storage.save_bindings({"1": self._b("1", "旧名片")})
+        binding = plugin._storage.get_binding("1")
+        bot = self._FakeBot(error=RuntimeError("api down"))
+
+        asyncio.run(plugin._refresh_binding_profile(self._group_event(bot=bot), binding))
+
+        assert plugin._storage.get_binding("1").nickname == "旧名片"
+
+    def test_refresh_private_chat_uses_stranger_info(self, plugin):
+        plugin._storage.save_bindings({"1": self._b("1", "旧名片")})
+        binding = plugin._storage.get_binding("1")
+        event = FakeEvent("1")  # 无 group_id → 私聊分支
+        bot = self._FakeBot({"get_stranger_info": {"nickname": "私聊昵称"}})
+        event.bot = bot
+
+        asyncio.run(plugin._refresh_binding_profile(event, binding))
+
+        assert plugin._storage.get_binding("1").nickname == "私聊昵称"
+
+    def test_refresh_skipped_without_bot(self, plugin):
+        plugin._storage.save_bindings({"1": self._b("1", "旧名片")})
+        binding = plugin._storage.get_binding("1")
+
+        asyncio.run(plugin._refresh_binding_profile(self._group_event(), binding))
+
+        assert plugin._storage.get_binding("1").nickname == "旧名片"
+
+    def test_group_cards_fetched_for_aggregate_views(self, plugin):
+        bot = self._FakeBot(
+            {
+                "get_group_member_list": [
+                    {"user_id": 1, "card": "新名片A", "nickname": "昵称A"},
+                    {"user_id": 2, "card": "", "nickname": "昵称B"},
+                ]
+            }
+        )
+        event = self._group_event(bot=bot)
+
+        cards = asyncio.run(plugin._fetch_group_cards(event))
+
+        assert cards == {"1": "新名片A", "2": "昵称B"}
+
+    def test_fetch_group_cards_skipped_without_group(self, plugin):
+        assert asyncio.run(plugin._fetch_group_cards(FakeEvent("1"))) == {}
+
+    def test_collect_group_now_uses_fresh_cards(self, plugin):
+        today = datetime.now(SHANGHAI_TZ).date()
+        start = datetime.combine(today, dt_time(9, 0), tzinfo=SHANGHAI_TZ)
+        series = [
+            CourseSeries(
+                summary="高等数学",
+                dtstart=start,
+                duration=timedelta(minutes=95),
+                location="明理楼302",
+            )
+        ]
+        plugin._load_series = lambda b: series
+        members = [self._b("1", "旧名片")]
+        now_utc = (start + timedelta(minutes=30)).astimezone(timezone.utc)
+
+        data = plugin._collect_group_now(members, now_utc, cards={"1": "群新名片"})
+        assert data["groups"][0]["members"][0]["nickname"] == "群新名片"
+
+        data2 = plugin._collect_group_now([members[0]], now_utc)
+        assert data2["groups"][0]["members"][0]["nickname"] == "旧名片"  # 无 cards 回落
+
+    def test_collect_study_rank_uses_fresh_cards(self, plugin):
+        today = datetime.now(SHANGHAI_TZ).date()
+        start = datetime.combine(today, dt_time(9, 0), tzinfo=SHANGHAI_TZ)
+        series = [
+            CourseSeries(
+                summary="高等数学",
+                dtstart=start,
+                duration=timedelta(minutes=95),
+                location="明理楼302",
+            )
+        ]
+        plugin._load_series = lambda b: series
+        members = [self._b("1", "旧名片")]
+
+        data = plugin._collect_study_rank(
+            members, start.astimezone(timezone.utc), "日", cards={"1": "群新名片"}
+        )
+        assert data["rows"][0]["nickname"] == "群新名片"
+
+
 class TestAtQuery:
     """查询命令支持命令后 at 群友,查看 TA 的课表。"""
 
